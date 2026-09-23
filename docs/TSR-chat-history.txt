@@ -1,0 +1,1121 @@
+
+我想要训练一个标志牌检测模型，重点关注车道限速标志。我的数据集会下载公开的数据集，同时自己也会采集一些。
+
+当然，因为数据来源不同，摄像头的视角、焦距等都不一样。所以，像这样的数据我该如何去训练，才能让模型关注标志牌本身最本质的特征，而不是过拟合于其他信息？这个训练策略应该怎么做呢？
+
+可以，而且这个问题的核心其实不是“怎么把不同摄像头的数据混在一起训练”，而是：
+
+如何让网络把“标志牌本身”当作稳定因果特征，而把焦距、FOV、背景、天气、道路类型、摄像头颜色风格等当作不稳定因素。
+
+针对你这个“车道限速标志”任务，我建议你不要简单地把公开数据集 + 自采数据直接 concat 起来训练，而是从一开始就按 Domain Generalization + Object-Centric Learning + Data-Centric 闭环 去设计。
+
+你可以把整个策略理解成下面这一个主线：
+
+不同域的数据 → 消除域偏差 → 强化标志牌局部特征 → 模拟真实退化 → 分阶段训练 → 按域验证 → 持续挖 Hard Case。
+
+一、首先明确：真正容易被模型“偷懒学到”的是什么
+假设你有：
+
+TT100K；
+CCTSDB；
+Mapillary；
+自采 GS130WI；
+以后可能换别的相机。
+如果直接混起来训练，很容易出现一种现象：
+
+TT100K
+    ↓
+高清 / 某种城市道路 / 某种曝光 / 某种分辨率
+    ↓
+限速60
+
+自采
+    ↓
+640×352 / 鱼眼 / 某种畸变 / 某种道路
+    ↓
+限速40
+网络可能偷偷学到：
+
+background
+camera style
+FOV
+image sharpness
+color
+sign size
+road type
+↓
+class
+而不是：
+
+红色圆环
++
+数字 40 / 60 / 80
+↓
+class
+这就是典型的 shortcut learning。
+
+所以你的目标不是“让所有图像看起来一样”。
+
+更好的办法是：
+
+故意让非本质特征变得不可靠。
+
+二、我最推荐你的总体训练架构
+你这个任务最好不要只训练一个：
+
+YOLO → speed_limit_40
+     → speed_limit_60
+     → speed_limit_80
+我更推荐拆成两级。
+
+                     Camera Image
+                           │
+                           ▼
+                 ┌─────────────────┐
+                 │ Traffic Sign Det│
+                 └────────┬────────┘
+                          │
+                      sign bbox
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │ Sign Classifier │
+                 │ 40 / 60 / 80... │
+                 └─────────────────┘
+Detector 只负责：
+
+这里有没有限速标志？
+Classifier 才负责：
+
+这是40还是60？
+为什么我特别推荐这么做？
+因为你前面已经发现了：
+
+远距离时检测还能检出来，但是分类容易错；距离近以后分类才正确。
+
+这实际上强烈暗示：
+
+检测任务所需特征
+≠
+细粒度分类所需特征
+检测限速牌：
+
+⭕
+可能几十个像素就够。
+
+但是判断：
+
+40
+60
+80
+必须真正解析内部数字。
+
+如果全部塞给一个检测 head，它特别容易依赖上下文。
+
+三、第一件最重要的事情：做 Object-Centric 数据集
+这是我认为对你这个项目收益最大的步骤之一。
+
+对于每一个标志牌 bbox，把它 crop 出来：
+
+原图
+┌──────────────────────────────┐
+│             🚗               │
+│                              │
+│              ⭕60            │
+│                              │
+└──────────────────────────────┘
+               ↓
+
+crop
+┌──────────┐
+│   ⭕60    │
+└──────────┘
+但是不要只做严格 bbox。
+
+建议至少生成三类 crop：
+
+tight crop
+1.0× bbox
+
+medium crop
+1.3~1.5× bbox
+
+context crop
+2.0× bbox
+然后 classifier 训练时随机选择。
+
+这样做的作用非常重要：
+
+1. 强迫模型看标志本身
+原图里面：
+
+sign可能只有：
+
+10×10
+20×20
+30×30 pixel
+而 crop 后 resize 到：
+
+96×96
+128×128
+classifier 才真正有机会学习数字结构。
+
+2. 降低背景 shortcut
+因为：
+
+原图：
+sign : background
+1 : 10000
+
+crop：
+sign : background
+1 : 2
+背景信息的重要性直接下降几个数量级。
+
+四、不同摄像头的问题，不建议直接做“统一相机模型”
+例如：
+
+公开数据：
+1920×1080
+90° FOV
+
+你的相机：
+640×352
+120° FOV
+fisheye
+很多人第一反应是：
+
+我是不是应该把所有数据都变成自己的相机风格？
+
+不建议完全这么做。
+
+更好的训练策略是：
+
+Domain Randomization
+让一个标志牌经历大量随机成像过程：
+
+clean sign
+
+   ↓
+
+random resize
+
+   ↓
+
+random blur
+
+   ↓
+
+random perspective
+
+   ↓
+
+random lens distortion
+
+   ↓
+
+random exposure
+
+   ↓
+
+random noise
+
+   ↓
+
+random compression
+
+   ↓
+
+random crop
+最终：
+
+模型无法依赖：
+某个camera style
+
+只能依赖：
+sign structure
+五、你这里最重要的 augmentation，不是 Mosaic
+对于限速牌，很多常规 detection augmentation 没那么关键。
+
+我反而会优先做下面这些。
+
+① Small Object Degradation
+这个对你尤其关键。
+
+例如把标志牌先缩成：
+
+8×8
+12×12
+16×16
+24×24
+32×32
+再放大回来。
+
+例如：
+
+crop
+ ↓
+resize 16×16
+ ↓
+resize 96×96
+ ↓
+classifier
+
+这一步是在模拟：
+
+50m
+80m
+100m
+120m
+时的真实成像。
+
+这比普通：
+
+Gaussian blur
+有效得多。
+
+② Defocus Blur
+因为真实摄像头不是单纯 Gaussian blur。
+
+加入：
+
+Gaussian blur
+motion blur
+defocus blur
+尤其车辆运动：
+
+horizontal motion blur
+非常常见。
+
+③ JPEG / ISP degradation
+你的板端摄像头链路会经历：
+
+sensor
+↓
+ISP
+↓
+resize
+↓
+NV12/YUV
+↓
+编码
+公开数据集的图像链路却完全不同。
+
+所以建议随机加入：
+
+JPEG quality 30~100
+contrast
+gamma
+brightness
+saturation
+white balance
+noise
+这实际上是在摧毁 Camera ID。
+
+六、针对你 GS130WI 的畸变问题，我甚至会专门做 distortion augmentation
+假设公开数据中：
+
+| | | | |
+而你的广角相机中：
+
+) ) | ( (
+那么模型很容易发生 domain shift。
+
+你可以训练时随机模拟 radial distortion：
+
+x
+d
+=
+x
+(
+1
++
+k
+1
+r
+2
++
+k
+2
+r
+4
+)
+x 
+d
+​
+ =x(1+k 
+1
+​
+ r 
+2
+ +k 
+2
+​
+ r 
+4
+ )
+y
+d
+=
+y
+(
+1
++
+k
+1
+r
+2
++
+k
+2
+r
+4
+)
+y 
+d
+​
+ =y(1+k 
+1
+​
+ r 
+2
+ +k 
+2
+​
+ r 
+4
+ )
+其中：
+
+k1
+k2
+每张图片随机。
+
+甚至不一定需要模拟得特别准确。
+
+关键不是：
+
+完美模拟 GS130WI。
+
+而是：
+
+让模型知道世界上存在很多不同 distortion。
+
+这是 domain randomization 很重要的思想。
+
+七、一个非常强的策略：Copy-Paste
+这对你这个问题特别适合。
+
+从公开数据里把限速牌抠出来：
+
+       ⭕60
+随机贴到你自己采集的道路场景：
+
+你的真实道路背景
++
+公开数据限速牌
+得到：
+
+GS130WI camera style
++
+TT100K sign
+这样直接破坏了：
+
+dataset ↔ class
+之间的相关性。
+
+甚至可以：
+
+TT100K sign
+→ Shanghai road
+
+your sign
+→ TT100K background
+这样网络无法推断：
+
+“这种道路一定是60”
+它只能去看标志牌。
+
+这是非常典型的 background intervention。
+
+八、甚至可以进一步做“背景随机化”
+比如一个 60 标志。
+
+原始：
+
+城市道路 + 60
+你可以：
+
+高速路 + 60
+乡村道路 + 60
+隧道 + 60
+工业园 + 60
+树林 + 60
+停车场 + 60
+虽然其中一些场景在现实中可能不常见。
+
+但训练的时候反而是好事。
+
+因为你正在告诉模型：
+
+P(background | class)
+不应该成为分类依据。
+
+九、你甚至可以人为设计一个非常重要的实验
+我很推荐你做：
+
+Background swap test
+把同一个标志：
+
+⭕60
+贴到：
+
+A background
+B background
+C background
+D background
+然后看分类概率：
+
+          P(60)
+
+A         0.93
+B         0.91
+C         0.94
+D         0.48
+如果变化非常大：
+
+模型仍然依赖背景。
+
+一个好的模型应该：
+
+P(class | sign)
+基本不受背景影响。
+
+这甚至可以成为你以后 Data-Centric AI 自动闭环中的自动质量指标。
+
+十、还有一个非常重要的问题：不要随机 split 数据
+这是交通场景模型最容易犯的错误之一。
+
+如果你：
+
+train_test_split(images)
+
+实际上很可能：
+
+Frame 001 → train
+Frame 002 → train
+Frame 003 → val
+Frame 004 → train
+由于连续视频高度相似：
+
+val accuracy = 98%
+但完全没有意义。
+
+你之前已经用“标志牌生命周期”来看检测结果，这其实是非常正确的思路。
+
+你应该按：
+
+Trip
+Route
+Camera
+Date
+Physical Sign
+进行 split。
+
+例如：
+
+Train:
+Camera A
+Camera B
+Road 1
+Road 2
+Day 1
+
+Val-ID:
+Camera A
+Road 3
+
+Val-OOD:
+Camera C
+
+Test:
+Camera D
+unseen roads
+真正重要的是：
+
+OOD Test
+而不是 random test。
+
+十一、你的 validation 应该按 domain 拆开
+不要只有：
+
+mAP = 92%
+而应该形成一个矩阵。
+
+例如：
+
+Domain	Recall	Classification
+TT100K	96%	94%
+Mapillary	91%	89%
+自采 Camera A	88%	82%
+自采 Camera B	83%	76%
+Night	75%	68%
+Small Object	80%	61%
+再按 object size 分：
+
+< 8 px
+8–16 px
+16–32 px
+32–64 px
+>64 px
+我甚至认为这个指标比整体 mAP 对你的项目更重要。
+
+十二、针对“限速牌”的训练还有一个很特殊的问题
+40、60、80：
+
+⭕40
+⭕60
+⭕80
+绝大多数结构其实是一模一样的。
+
+真正具有分类信息的区域只有：
+
+数字
+因此 classifier 可以使用一个额外的 attention 约束。
+
+例如：
+
+Sign crop
+┌────────────┐
+│    红圈     │
+│     60      │
+│            │
+└────────────┘
+让网络额外预测：
+
+digits region
+或者更直接：
+
+detector
+ ↓
+speed limit sign
+ ↓
+digit recognizer
+ ↓
+"60"
+甚至变成：
+
+Detection
++
+OCR-like recognition
+而不是：
+
+100个speed-limit class
+对于限速牌任务，这个设计往往更加符合问题本身。
+
+十三、我建议你的实际训练流程
+如果让我给你设计 V1，我会这样做：
+
+阶段 1
+公开数据预训练 detector
+        ↓
+只检测：
+speed_limit_sign
+other_sign
+然后：
+
+阶段 2
+构建 sign crop dataset
+
+TT100K
+CCTSDB
+Mapillary
+自采
+ ↓
+统一成 crop
+ ↓
+训练 classifier
+训练 classifier 时：
+
+30% 原图 crop
+
+20% small object degradation
+
+15% blur
+
+10% brightness / gamma
+
+10% JPEG
+
+5% distortion
+
+5% perspective
+
+5% grayscale / color changes
+这些数字不是固定参数，而是初始实验配置。
+
+然后：
+
+阶段 3
+
+公开数据 + 自采数据
+       ↓
+domain balanced sampler
+       ↓
+fine tune
+注意我这里会用：
+
+domain-balanced sampling
+
+比如你有：
+
+TT100K      50,000
+自采         5,000
+绝对不要简单按：
+
+10 : 1
+训练。
+
+否则 TT100K 会主导模型。
+
+可以做：
+
+TT100K       25%
+Mapillary    25%
+CCTSDB       20%
+自采          30%
+或者 batch 内强制各 domain 均衡。
+
+十四、还有一个我很建议你做的技巧：Camera Holdout
+例如你最终有：
+
+Camera A
+Camera B
+Camera C
+永远留一个：
+
+Camera C
+训练完全不可见。
+
+如果你的策略真正有效：
+
+Camera A+B
+        ↓
+训练
+        ↓
+Camera C
+仍然表现良好
+这才说明：
+
+模型真正学到了 sign，而不是 camera。
+
+这实际上就是你整个研究问题最干净的实验设计。
+
+十五、最终可以形成一个你很适合做的数据闭环
+这其实和我们之前讨论的 Data-Centric AI 非常契合：
+
+           数据采集
+              ↓
+         自动模型推理
+              ↓
+      按 sign lifecycle 聚合
+              ↓
+          Error Mining
+              ↓
+ ┌────────────┼─────────────┐
+ │            │             │
+ ▼            ▼             ▼
+小目标       模糊          Domain
+             │             Shift
+             │
+             ▼
+        数据分布统计
+             ↓
+        Augmentation建议
+             ↓
+        Hard Sample生成
+             ↓
+           重训练
+             ↓
+          OOD Test
+             ↓
+            部署
+尤其是你的系统以后完全可以自动判断：
+
+错误主要来自：
+
+Small sign        43%
+Blur              17%
+Exposure           8%
+Occlusion          7%
+Domain shift       19%
+Label issue         6%
+然后 Agent 自动决定下一轮：
+
+增加 small-object augmentation
+增加新 camera 数据
+减少 blur augmentation
+增加 60/80 hard samples
+这就已经不是普通的“训练 YOLO”了。
+
+而是一个真正的：
+
+Data-Centric Training System
+
+如果只让我挑 5 个最值得你马上做的事情
+按工程收益来看，我会优先：
+
+Detector 和限速牌 classifier 解耦。
+把所有数据转换成 sign-centric crop dataset。
+专门做 small-object degradation，模拟 8/12/16/24/32 px 标志牌。
+使用 Copy-Paste / background swap 打断背景与类别之间的相关性。
+按 Camera / Road / Physical Sign 做 OOD split，而不是随机划分。
+其中第 3 + 4 + 5 做完，你基本就能回答你最开始那个问题：
+
+“模型到底是在学限速标志，还是在记摄像头和场景？”
+
+而且考虑到你前面已经观察到同一标志牌生命周期内，远处检测正确但分类错误、靠近后才分类正确，我会把“sign 像素尺寸 → 分类准确率曲线”直接定义成这个项目最核心的 KPI 之一。它会比单独看 mAP 更快暴露模型究竟有没有学对东西。
+
+我无比同意你的观点。那么我是否要先准备数据？
+
+是的，先准备数据，而且我建议你现在先不要急着定模型。
+
+你这个项目里，前期最重要的资产其实不是网络结构，而是一个可分析、可追踪来源、可持续迭代的数据底座。后面 detector、classifier、augmentation、hard-case mining，都会建立在它上面。
+
+我建议第一阶段只做这 4 件事：
+
+收集多来源数据
+
+公开数据集：TT100K、CCTSDB、Mapillary 等
+自采数据：你当前摄像头的视频/图片
+尽量覆盖不同道路、光照、天气、距离、角度
+统一标签体系
+一开始不要搞太复杂，至少统一成：
+
+speed_limit_sign
+speed_limit_20
+speed_limit_30
+speed_limit_40
+speed_limit_50
+speed_limit_60
+speed_limit_70
+speed_limit_80
+...
+同时保留原始数据集自己的 label，方便以后追溯。
+
+每张图保留“域信息”
+这个非常重要。不要只有 image + bbox + class，还建议记录：
+
+dataset_source
+camera_id
+resolution
+route_id
+trip_id
+timestamp
+weather
+day/night
+original_sign_size
+哪怕有些字段目前为空也没关系。
+
+自动生成 sign crop
+对每一个 bbox，再生成一个独立的标志牌样本：
+
+full image
+   ↓
+bbox
+   ↓
+sign crop
+后面 classifier、small-object degradation、background swap 都直接基于这套 crop 数据做。
+
+我反而不建议你现在就做大量 augmentation。因为当前最重要的是先搞清楚：你到底拥有什么数据，以及这些数据的真实分布是什么。
+
+第一版数据准备完成后，我们先跑一次“数据体检”，重点看：
+
+每个类别多少样本
+每个数据源多少样本
+标志牌 bbox 像素尺寸分布
+不同类别的尺寸分布
+昼夜比例
+自采/公开数据比例
+各类长尾程度
+重复帧比例
+尤其是这张图：
+
+bbox width/height 与类别数量分布
+
+我认为会直接决定后面的训练策略。
+
+例如最后发现：
+
+< 10 px        18%
+10–20 px       42%
+20–40 px       27%
+> 40 px        13%
+那你的训练方法就和大部分普通交通标志检测任务完全不同——small-object degradation 会成为核心，而不是一个普通 augmentation。
+
+所以你现在最合理的顺序是：
+
+数据收集 → 标签统一 → 元数据整理 → crop生成 → 数据统计分析 → 再决定训练策略。
+
+如果你愿意，我们下一步可以直接把这个项目的数据目录结构、统一标注格式和 metadata schema 定下来。我建议这一版从一开始就按后面要做 Data-Centric AI 自动闭环 的标准设计，而不是临时堆一个 YOLO 数据集。
+
+搞这件事情 我用一个 RTX 3060 能搞不？
+
+完全可以。对你现在这个阶段，一张 RTX 3060 足够把整套流程跑起来，尤其是你先做数据准备、标志牌检测、crop classifier、数据闭环验证这些工作。
+
+如果是常见的 RTX 3060 12GB，我会把它定位为“很适合原型开发和中小规模训练”。你可以比较舒服地做 YOLO 系列的小中型模型、ResNet/EfficientNet/MobileNet 这类分类器，以及大量数据增强、crop 生成、hard-case mining。真正的限制主要出现在：超大分辨率、超大 batch、很大的 Transformer 检测器，或者一次训练非常大的数据集。
+
+对你的任务，我甚至不建议一开始追求大模型。因为你的核心问题是小目标、跨相机域泛化、分类细粒度能力和数据质量，这些问题换 4090 也不会自动解决。3060 完全足够让你验证训练策略。
+
+一个很现实的配置可以是：
+
+Detector：YOLO11n / YOLO11s 这一档；
+输入分辨率：先从 640 或 960 开始；
+batch size：根据显存动态调，通常 8～32 这个量级；
+Classifier：96×96、128×128 或 224×224 的 crop；
+mixed precision：FP16；
+数据集先做到几万～十几万张都没问题，只是训练时间会增长。
+你这个项目真正可能吃资源的反而不是模型，而是数据处理。比如视频抽帧、重复帧去重、自动裁剪、图像质量分析、生成不同退化版本。这里 CPU、SSD 速度和磁盘容量也很重要。
+
+如果是我来配你这套系统，RTX 3060 阶段我会先坚持一个原则：
+
+先用小模型把数据闭环跑通，再决定是否值得升级 GPU。
+
+等你以后发现瓶颈明确变成“训练太慢”或“必须上更大输入分辨率/更大模型”，再考虑 4090、5090 或云 GPU。现在为了做这个项目，没有必要先换卡。
+
+还有一个问题，我的目标版、开发版的算力比较低。所以我给你一个参考吧，他们官方提供的模型基本都是 YOLOv5 这个级别的
+
+那反而更说明我们前面那个思路要稍微“工程化”一点：训练端可以稍微富裕，部署端必须极简。
+
+如果目标板官方能稳定支持的就是 YOLOv5 这个量级，我建议从项目第一天就把“部署约束”当成模型设计的一部分，而不是最后训练完再想办法压缩。
+
+对你的限速标志任务，我会优先考虑这样的结构：
+
+输入图像
+   ↓
+YOLOv5n / YOLOv5s
+   ↓
+只检测 speed_limit_sign
+   ↓
+裁剪 ROI
+   ↓
+极小分类器
+   ↓
+20 / 30 / 40 / 50 / 60 / 80...
+这里有一个关键点：detector 不要承担细粒度限速值分类。
+
+因为如果让 YOLO 同时输出：
+
+speed_limit_20
+speed_limit_30
+speed_limit_40
+speed_limit_50
+speed_limit_60
+...
+在远距离、小目标情况下，它既要解决：
+
+“这是一个限速牌吗？”
+“里面到底是 40、60 还是 80？”
+这两个难度完全不同的问题。
+
+而你的板端算力有限时，我们反而可以把 detector 做得更简单：
+
+class = speed_limit_sign
+甚至整个模型只需要学一个类别。
+
+这样 YOLOv5n 这种非常小的模型都有可能做得不错。
+
+然后第二级 classifier 不需要大。
+
+比如输入：
+
+64×64
+96×96
+128×128
+模型可以是：
+
+MobileNetV3-Small
+ShuffleNetV2
+GhostNet
+甚至自己设计一个很小的 CNN
+这种 classifier 的计算量相对于整幅 640×352 图像上的检测器来说，通常小很多。
+
+因为它处理的是一个：
+
+96 × 96
+的小 crop，而不是：
+
+640 × 352
+整张图。
+
+所以“两级模型”听起来像增加了一个网络，实际上整体算力未必增加很多。
+
+而且你这个任务还有一个特别适合利用的性质：
+
+绝大部分帧根本没有必要运行 classifier 很多次。
+
+正常道路场景里，一帧可能只有：
+
+0 个限速牌
+1 个限速牌
+偶尔 2 个
+所以实际 pipeline 是：
+
+YOLO：每帧运行
+        ↓
+没检测到
+        ↓
+结束
+只有：
+
+检测到一个 sign
+        ↓
+crop
+        ↓
+运行一次 tiny classifier
+计算成本非常可控。
+
+甚至还能进一步优化。
+
+你的视频里同一个限速牌会持续：
+
+Frame 101
+Frame 102
+Frame 103
+...
+Frame 125
+完全没必要每帧都重新分类。
+
+可以：
+
+Detector
+   ↓
+Tracking
+   ↓
+Sign lifecycle
+   ↓
+选最清晰的几帧
+   ↓
+Classifier
+   ↓
+时序投票
+例如：
+
+frame 1     60: 0.52
+frame 2     80: 0.55
+frame 3     60: 0.71
+frame 4     60: 0.89
+frame 5     60: 0.96
+最终：
+
+Track #17 → speed limit 60
+这样既省计算量，准确率反而还能提高。
+
+这跟你之前观察到的“远处分类不准，近了才准确”正好契合。
+
+所以我现在会给这个项目一个更明确的架构
+训练阶段：
+
+                ┌→ 大量公开数据
+                │
+数据平台 ────────┼→ 自采数据
+                │
+                └→ 合成/增强数据
+                        ↓
+                Teacher / 大模型
+                        ↓
+                 数据清洗、伪标签
+                        ↓
+              ┌────────────────┐
+              │                │
+          Detector         Classifier
+        YOLOv5n/s        Tiny CNN
+              │                │
+              └────────┬───────┘
+                       ↓
+                  INT8量化
+                       ↓
+                    板端
+注意这里甚至可以出现一个很有意思的设计：
+
+训练时用大模型，部署时完全不需要用大模型。
+
+比如你的 RTX 3060 上可以训练一个更强的 teacher：
+
+较大的 YOLO
+较大的 classifier
+用来：
+
+数据自动标注；
+hard case 挖掘；
+数据质量检查；
+给小模型生成 soft label；
+knowledge distillation。
+最终开发板上只留下：
+
+YOLOv5n
++
+Tiny Classifier
+这其实非常符合你想做的 Data-Centric AI 闭环。
+
+我甚至不建议你现在追求 YOLOv8 / YOLO11 / Transformer
+不是说这些模型不好，而是你的目标设备已经给了你一个非常清晰的工程约束：
+
+官方生态成熟度 > benchmark 上高几个点。
+
+嵌入式部署最怕的是：
+
+模型精度很好
+↓
+某个 OP 不支持
+↓
+算子回退 CPU
+↓
+量化精度暴跌
+↓
+转换失败
+↓
+最终 FPS 根本不可用
+如果厂家官方 example 已经大量围绕 YOLOv5 做好了：
+
+模型转换
+量化
+算子支持
+NPU部署
+后处理
+那 YOLOv5 反而很可能是第一版最合理的选择。
+
+而且对于你这个项目，我现在越来越觉得有一个方向特别值得坚持：
+
+不要靠模型规模解决问题，靠数据和时序解决问题。
+
+也就是说：
+
+小 YOLO
++
+高质量数据
++
+Object-centric classifier
++
+tracking
++
+生命周期多帧融合
+而不是：
+
+一个巨大的 detector
+试图一帧把所有问题解决
+这会非常适合你的低算力目标板。
+
+所以如果我们继续往下做，我觉得下一步已经可以不再泛泛讨论了。我们可以直接把第一版系统定成：
+
+YOLOv5n detector + Tiny classifier + lifecycle voting
+
+然后围绕这个架构反推：
+
+数据到底该怎么准备、标签该怎么设计、训练集目录该怎么组织。
+
+这条路线既符合你的板端算力约束，也给后面的 Data-Centric 闭环留下了很大的发挥空间。
+
+
+
+

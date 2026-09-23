@@ -1,0 +1,34 @@
+# Python / uv
+.venv/
+.wheels/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+uv.lock
+
+# 数据与实验产物（体积大，不入库）
+datasets/
+data/**
+!data/README.md
+!data/**/.gitkeep
+runs/
+weights/
+*.pt
+*.onnx
+*.engine
+*.zip
+
+# 报告与本地杂项（按需保留；大文件仍勿提交）
+*.log
+.DS_Store
+.Xauthority
+
+# IDE / 环境
+.env
+.env.*
+!.env.example

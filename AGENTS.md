@@ -1,0 +1,114 @@
+# AGENTS.md
+
+Traffic Sign Recognition（TSR）：中国场景 **限速标志** 检测与识别，最终部署到 **地瓜派 RDK X5**。
+
+必读：[`docs/target.md`](docs/target.md)、[`docs/strategy.md`](docs/strategy.md)、[`docs/local_environment.md`](docs/local_environment.md)。
+设计讨论原文：[`docs/TSR-chat-history.txt`](docs/TSR-chat-history.txt)（参考用；冲突时以 `target.md` / `strategy.md` / 本文件为准）。
+
+## 背景：Cursor → OpenCode 交接
+
+- 本项目此前由 Cursor 创建并推进；现转由 OpenCode 接手。
+- `.cursor/rules/*.mdc` 保留，其中有价值约定已并入本文件；**冲突处以本文件为准**。
+- 已知冲突：`.cursor/rules/python-ultralytics.mdc` 写的入口 `uv run python` **已废弃**——本机 `uv run` 会重解析依赖、可能装错（CPU 版）torch。一律 `.venv/bin/python scripts/...`。
+
+## 目标与约束
+
+- 中级：`YOLOv5n/s` 级 **detector** + **tiny classifier**（两级流水线）；冒烟权重 `weights/yolov5nu.pt`
+- 板端：RDK X5；输入 **640×352**（GS130WI，推理图已去畸变）；在线 ≥10 Hz，离线目标 ≥60 Hz
+- **部署约束优先于追求更新更大的检测器**；不默认改用 YOLO8/11/Transformer
+
+## 架构（必须遵守）
+
+```
+图 → Detector（优先只检 speed_limit_sign）→ crop → Tiny Classifier（限速数值）
+```
+
+可选后期：tracking → lifecycle → 多帧投票。
+不要把「是否限速牌」和「40/60/80…」全部塞进同一个 detect 多类 head 作为默认方案。
+
+## 当前阶段：数据集整理
+
+1. TT100K 已下载到 `data/TT100K`（YOLO 格式）；限速过滤已完成（产物见下）
+2. **标签审计已完成（2026-09-23）**：修正 pm/il 语义颠倒（pm=限重、il=最低限速）并重建过滤子集；颜色审计误报经用户全量复核证伪（蓝底=高速背板/夜景偏色），**确认 TT100K 标注无误、未剔除任何样本**，复盘见 `reports/label_audit.md`
+3. sign crop 已按新语义重建：`data/TT100K_speed_crops/`（pl*+il*，7734 sign ×4 scale = 30936 crops + `manifest.csv`），体检报告 `reports/crop_stats.md`；tiny/暗图样本全部保留（贴近部署场景）
+4. 下一步：小规模 smoke 训练（detector 单类 + tiny classifier）；增强等体检结论定了再上
+5. `data/self/` 预留自采测试集（GS130WI），现为空；就绪前不做依赖自采数据的训练主路径
+
+### 限速过滤产物（2026-09-23 语义修正后重建）
+
+| 路径 | 用途 |
+|------|------|
+| `data/TT100K_speed_det/` + `configs/TT100K_speed_det.yaml` | 检测：单类 `speed_limit_sign`（仅 pl*+il* 框） |
+| `data/TT100K_speed_mc/` + `configs/TT100K_speed.yaml` | 多类限速：**pl*+il*，29 类**（plx/ilx 无实例），id 从 0 连续 |
+| `data/TT100K_weight_pm/` + `configs/TT100K_weight_pm.yaml` | **限重归档（pm*，非速度）**：hard-negative 备用，勿当正类训练 |
+| `data/TT100K_speed_meta/class_map.json` | speed 类映射（old↔new、semantic、speed_value） |
+| `data/TT100K_speed_meta/weight_class_map.json` | weight 类映射（speed_value 为吨） |
+| `data/TT100K_speed_meta/label_suspects.json` | ~~已废弃~~ → `color_flags.json`（信息性颜色标记，非错误清单） |
+| `reports/speed_filter_stats.md` | 过滤统计 |
+| `reports/class_distribution.md` | pl/il 与各限速值分布报告（图在 `reports/figures/`） |
+| `reports/label_audit.md` | 标签审计报告（语义修正证据 + 可疑清单） |
+| `scripts/filter_speed_limit.py` | 可重复执行（`--dry-run` / `--force` / `--exclude <json>`） |
+
+注：过滤子集 images 为指向 `data/TT100K/images` 的软链，不重复占磁盘。
+
+### 数据约定（自 .cursor/rules 并入，仍有效）
+
+- 每条样本尽量保留 domain 元数据：`dataset_source` / `camera_id` / `resolution`（可空）
+- 先 label 统一 + crop + 数据体检，再上大规模 augmentation
+- 过滤后 class id 从 0 连续编号，与 YAML `names` 一致；保留原始 TT100K 类名映射便于追溯
+- 数据集 YAML 放 `configs/`（`path` 为绝对路径）；勿改 Ultralytics 包内原始 yaml
+- **以数据自带标签为准**：视觉统计规则只能做体检，不能做剔除判定；任何数据改动必须先经用户人眼确认
+  （2026-09-23 教训：颜色审计曾把「蓝底背板/夜景偏色」误判为错标，经用户全量复核证伪，复盘见 `reports/label_audit.md`）
+
+## 限速类别（TT100K 前缀，语义已修正 2026-09-23）
+
+| 组别 | 前缀/名 | 含义 | 外观 |
+|------|---------|------|------|
+| 最高限速 | `pl*`（含 `plx`） | 禁止超过的限速 | 白底红圈黑数字 |
+| 最低限速 | `il*`（含 `ilx`） | 最低速度 | **蓝底**白数字，值 50–110 |
+| 限重（非速度） | `pm*`（含 `pmx`） | 限制质量，值为**吨**（1.5–55） | 白底红圈黑数字+t |
+
+**重要**：早期文档把 pm 当「最低限速」、il 当「限速信息」——语义颠倒（2026-09-23 经用户目检
+`1113.jpg pm20`=限重 20t + 全量颜色统计证实，见 `reports/label_audit.md`）。pm* 不属于限速类，
+已移入 `data/TT100K_weight_pm/` 留档（hard-negative 备用，勿当正类训练）。
+`plx` / `pmx` / `ilx` 在 TT100K 中无实例。
+
+不要默认扩到全量 221 类。扩类先改本文件与 `docs/strategy.md`。
+检测阶段标签可先合并为 `speed_limit_sign`；分类阶段再映射到具体速度值。
+
+## 目录与 git
+
+```
+docs/        # target / strategy / setup / env / 聊天记录
+data/        # TT100K 全量 + TT100K_speed_* 过滤子集 + self/ 自采预留
+configs/     # 数据集 YAML
+scripts/     # check_env / download_tt100k / filter_speed_limit
+runs/ weights/ reports/   # 实验产物、权重、报告
+```
+
+`.gitignore` 已排除：`uv.lock`、`data/**`（除 README）、`runs/`、`weights/`、`*.pt`、`.wheels/`。勿提交大数据/权重。
+
+## 环境（RTX 3060 12GB，CUDA toolkit 12.4）
+
+- 安装与下载步骤：[`docs/setup.md`](docs/setup.md)
+- Python：**uv** + 3.11；统一 `.venv/bin/python scripts/...`（不要 `uv run`；不要用系统 Python）
+- 环境冒烟：`.venv/bin/python scripts/check_env.py`（CUDA + yolov5nu）
+- torch 2.6.0+cu124 轮子来自阿里云镜像（`.wheels/`，已 gitignore）；不要升级 NVIDIA 驱动（桌面会话依赖）
+- 代理（易踩坑）：国内镜像（阿里云/清华/TT100K）先 `unset` 全部 proxy 直连；仅 GitHub 等海外源用 `http_proxy=http://127.0.0.1:7890`；勿依赖 `ALL_PROXY=socks://`（坑 uv/httpx）
+- 可用显存约 11GB（桌面占用约 0.7GB）；OOM 先降 `batch`
+
+## 训练与验证原则（摘要）
+
+- Object-centric crop；核心 KPI：`sign 像素尺寸 → 分类准确率`
+- 按 domain / camera / trip 验证；禁止视频近邻帧随机 split
+- 多域时 domain-balanced sampling；用 background swap 检查是否依赖背景
+- 全量下载 / 全量训练 / 长时间实验：先征得用户确认
+- 尚无测试/lint 配置；验证以脚本冒烟 + 数据体检报告为主
+- 详情见 [`docs/strategy.md`](docs/strategy.md)
+
+## Agent 行为
+
+- 回复中文、简洁
+- 不主动 commit / push
+- 改目标/架构先改文档再改代码
+- 阻塞写 `reports/BLOCKED.md`，停止无效重试

@@ -1,0 +1,31 @@
+---
+description: TSR 限速识别项目总则（始终生效）
+alwaysApply: true
+---
+
+# TSR Speed Limit — 项目总则
+
+动手前先读：`AGENTS.md`、`docs/target.md`、`docs/strategy.md`、`docs/setup.md`。
+
+## 范围与阶段
+
+- 只做中国场景 **限速** 检测与识别。
+- **当前只在 TT100K 上工作**（`data/TT100K`）；`data/self/` 是未来自采测试集。
+- TT100K 过滤：`pl*` / `pm*` / `il*`（含 x 后缀）。不擅自扩到 221 类。
+
+## 架构与部署（硬约束）
+
+- 默认两级：`YOLOv5n/s` detector（优先单类 `speed_limit_sign`）+ tiny classifier。
+- 冒烟权重用 `yolov5nu.pt`（Ultralytics YOLOv5u）。
+- 目标板：RDK X5；输入 640×352；在线 ≥10 Hz。
+
+## 技术栈与目录
+
+- 包管理：**uv**；脚本用 `.venv/bin/python scripts/...`（勿随意 `uv run` 以免重装 torch）。
+- `data/TT100K` = 公开集；`data/self/` = 自采测试；大文件不入库。
+
+## 协作
+
+- 对用户用中文、简洁。
+- 不主动 commit / push。
+- 阻塞写 `reports/BLOCKED.md`。

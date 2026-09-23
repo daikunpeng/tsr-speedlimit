@@ -1,0 +1,15 @@
+---
+description: Python / uv / YOLO 约定（对齐板端 YOLOv5）
+globs: "**/*.{py,toml,yaml,yml}"
+alwaysApply: false
+---
+
+# Python 与检测/分类实现
+
+- 依赖只通过 `uv add` / `uv sync`；入口 `uv run python scripts/...`。
+- 部署默认对齐 **YOLOv5n/s**；训练可用 Ultralytics 工具链，但选型服从 `docs/strategy.md`，勿擅自换 YOLO11「因为更新」。
+- 数据集 YAML 放 `configs/`；限速子集与 crop 元数据不要改坏 Ultralytics 包内原始 yaml。
+- Detector 标签与 Classifier 标签分开；保留原始 TT100K 类名映射表。
+- 标签过滤后 class id 从 0 连续编号，与 YAML `names` 一致。
+- 训练从小模型、`imgsz` 贴近部署（可先 640）起步；OOM 先降 `batch`。
+- 脚本可重复：明确 CLI、日志；全量任务默认需用户确认。

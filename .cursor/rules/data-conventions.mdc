@@ -1,0 +1,14 @@
+---
+description: 数据目录与标签约定
+globs: "{data,datasets,configs}/**/*"
+alwaysApply: false
+---
+
+# 数据约定
+
+- `data/TT100K/`：公开全量；`data/TT100K_speed_det/` / `TT100K_speed_mc/`：限速过滤产物（images 软链）。
+- `data/self/`：目标场景自采测试集；空时不要写依赖它的主流程。
+- 过滤脚本：`scripts/filter_speed_limit.py`；映射见 `data/TT100K_speed_meta/class_map.json`。
+- 每条样本尽量保留 domain 元数据：`dataset_source`、`camera_id`、`resolution` 等（可空）。
+- 先统一 label + crop + 体检，再大规模 augmentation。
+- 划分按 trip/camera/road，禁止近邻视频帧随机 split。
