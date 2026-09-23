@@ -31,8 +31,15 @@ Traffic Sign Recognition（TSR）：中国场景 **限速标志** 检测与识�
 1. TT100K 已下载到 `data/TT100K`（YOLO 格式）；限速过滤已完成（产物见下）
 2. **标签审计已完成（2026-09-23）**：修正 pm/il 语义颠倒（pm=限重、il=最低限速）并重建过滤子集；颜色审计误报经用户全量复核证伪（蓝底=高速背板/夜景偏色），**确认 TT100K 标注无误、未剔除任何样本**，复盘见 `reports/label_audit.md`
 3. sign crop 已按新语义重建：`data/TT100K_speed_crops/`（pl*+il*，7734 sign ×4 scale = 30936 crops + `manifest.csv`），体检报告 `reports/crop_stats.md`；tiny/暗图样本全部保留（贴近部署场景）
-4. 下一步：小规模 smoke 训练（detector 单类 + tiny classifier）；增强等体检结论定了再上
-5. `data/self/` 预留自采测试集（GS130WI），现为空；就绪前不做依赖自采数据的训练主路径
+4. **smoke 训练已完成（2026-09-23）**：
+   - detector `yolov5nu` 100ep@640 → `runs/detector/smoke1/`，val best mAP50≈0.73；
+     test 尺寸分桶 **recall@0.25=92.4%**，目标区间 12–28px **97.6%**，FP/img@0.25=0.11
+     （`reports/detector_eval_size.md`，原始明细 `runs/eval/smoke1_test/`）
+   - tiny classifier 245k 参数 → **test acc 94.9%**，各尺寸桶 ≥88%
+     （`reports/classifier_smoke.md`，`runs/classifier/smoke1/`）
+   - 主混淆：`il80→il60`（22 次）、相邻限速值互混；增强/难例挖掘待做
+5. 下一步：端到端级联评估（det crop→cls，模拟 640 部署链路）+ 数据增强；X5 导出前先固化评估基线
+6. `data/self/` 预留自采测试集（GS130WI），现为空；就绪前不做依赖自采数据的训练主路径
 
 ### 限速过滤产物（2026-09-23 语义修正后重建）
 
@@ -49,7 +56,10 @@ Traffic Sign Recognition（TSR）：中国场景 **限速标志** 检测与识�
 | `reports/label_audit.md` | 标签审计报告（语义修正证据 + 可疑清单） |
 | `scripts/filter_speed_limit.py` | 可重复执行（`--dry-run` / `--force` / `--exclude <json>`） |
 
-注：过滤子集 images 为指向 `data/TT100K/images` 的软链，不重复占磁盘。
+注：过滤子集 `images/<split>/` 为**真实目录 + 逐文件软链**指向 `data/TT100K/images`（不占磁盘）。
+**禁止**把 `images` 做成整目录软链：ultralytics `check_det_dataset()` 对路径 `.resolve()`
+会跟到原始 `TT100K/labels`（221 类），单类集会把全部正样本标成 corrupt 丢掉
+（2026-09-23 已踩坑，`filter_speed_limit.py::ensure_images_tree` 已修正）。
 
 ### 数据约定（自 .cursor/rules 并入，仍有效）
 
@@ -59,6 +69,8 @@ Traffic Sign Recognition（TSR）：中国场景 **限速标志** 检测与识�
 - 数据集 YAML 放 `configs/`（`path` 为绝对路径）；勿改 Ultralytics 包内原始 yaml
 - **以数据自带标签为准**：视觉统计规则只能做体检，不能做剔除判定；任何数据改动必须先经用户人眼确认
   （2026-09-23 教训：颜色审计曾把「蓝底背板/夜景偏色」误判为错标，经用户全量复核证伪，复盘见 `reports/label_audit.md`）
+- **尺寸/坐标系统一按 @640 等效像素报告**（TT100K 2048 方图 ×0.3125；部署 640×352 用保持宽高比的 scale）
+  — 检测/分类的尺寸分桶、target 区间 12–28px 均是 @640 口径；源图**禁止离线 resize**（归一化标签会与 ultralytics 在线缩放失配）
 
 ## 限速类别（TT100K 前缀，语义已修正 2026-09-23）
 

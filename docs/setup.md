@@ -77,6 +77,14 @@ export https_proxy=http://127.0.0.1:7890
 - 不要依赖 shell 里默认的 `ALL_PROXY=socks://127.0.0.1:7890/` 跑 `uv add` / 大包下载（本机曾因此在 `pypi.nvidia.com` 反复失败）。
 - 不要假设「科学上网开着，官方 PyTorch CUDA 索引就一定比阿里云镜像快」——CUDA 大轮子优先走阿里云镜像更省事。
 
+### Ultralytics 训练首次联网（yolo26n / Arial）
+
+- 训练启动时 `check_amp()` 会一次性下载 `weights/yolo26n.pt` **仅作 AMP 自检**（日志：`not used for training`），
+  与部署模型 `yolov5nu.pt` 无关，**不会上 X5 板**；`weights/*.pt` 已 gitignore。
+- GitHub 直连/代理都可能卡死在个位数百分比。已下好的话跳过；若需重下可用国内镜像前缀：
+  `curl -L -o weights/yolo26n.pt "https://gh-proxy.com/https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt"`
+- 字体 `~/.config/Ultralytics/Arial.ttf` 同理（plot 用，一次性）。
+
 ## 数据布局
 
 ```

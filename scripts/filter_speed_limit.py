@@ -103,18 +103,39 @@ def build_class_map(names: dict[int, str], keep: set[str]) -> list[dict]:
     return rows
 
 
-def ensure_images_link(out_root: Path, force: bool) -> None:
+def ensure_images_tree(out_root: Path, force: bool) -> None:
+    """Real images/<split>/ dirs with per-file symlinks into SRC_DIR images.
+
+    MUST NOT be a directory-level symlink: ultralytics check_det_dataset()
+    does (path/train).resolve() which follows the symlink into data/TT100K/images,
+    then img2label_paths maps to the ORIGINAL multi-class data/TT100K/labels —
+    silently training on wrong labels (class ids > nc -> all positive labels
+    dropped as "corrupt").
+    Only images that have a label file in this out_root are linked (keeps
+    label/image 1:1 for ultralytics verify).
+    """
     link = out_root / "images"
-    target = SRC_DIR / "images"
-    if link.is_symlink() or link.exists():
-        if force:
-            if link.is_symlink() or link.is_file():
-                link.unlink()
-            elif link.is_dir():
-                shutil.rmtree(link)
-        else:
-            return
-    link.symlink_to(target.resolve(), target_is_directory=True)
+    if link.is_symlink() or link.is_file():
+        link.unlink()
+    elif link.is_dir() and force:
+        shutil.rmtree(link)
+    link.mkdir(parents=True, exist_ok=True)
+
+    exts = {".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"}
+    for split in SPLITS:
+        lbl_dir = out_root / "labels" / split
+        src_dir = SRC_DIR / "images" / split
+        dst_dir = link / split
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        if not lbl_dir.is_dir() or not src_dir.is_dir():
+            continue
+        labels = {p.stem for p in lbl_dir.glob("*.txt")}
+        for p in src_dir.iterdir():
+            if p.suffix not in exts or p.stem not in labels:
+                continue
+            tgt = dst_dir / p.name
+            if not tgt.exists() and not tgt.is_symlink():
+                tgt.symlink_to(p.resolve())
 
 
 def prepare_out_root(out_root: Path, force: bool) -> None:
@@ -123,7 +144,8 @@ def prepare_out_root(out_root: Path, force: bool) -> None:
     out_root.mkdir(parents=True, exist_ok=True)
     for split in SPLITS:
         (out_root / "labels" / split).mkdir(parents=True, exist_ok=True)
-    ensure_images_link(out_root, force=force)
+    # images tree created after labels are written (ensure_images_tree needs label stems)
+    # so only mkdir here; tree link is finalized by finalize_images() at end of run.
 
 
 def write_yaml(path: Path, out_root: Path, class_map: list[dict], header: str) -> None:
@@ -479,6 +501,12 @@ def main() -> int:
                 exclude_keys,
             )
         )
+
+    # After labels are written: real images/<split>/ dirs + per-file symlinks
+    # (directory-level symlink would break ultralytics resolve() — see ensure_images_tree)
+    ensure_images_tree(OUT_MC, force=args.force)
+    ensure_images_tree(OUT_DET, force=args.force)
+    ensure_images_tree(OUT_WEIGHT, force=args.force)
 
     write_yaml(
         CONFIGS / "TT100K_speed.yaml",

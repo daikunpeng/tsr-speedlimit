@@ -3,7 +3,7 @@
 | 子目录 | 用途 | 状态 |
 |--------|------|------|
 | `TT100K/` | 公开 TT100K 全量 221 类（YOLO） | 已下载并转换 |
-| `TT100K_speed_det/` | 限速检测子集（单类，仅 pl*+il* 框；images 软链到 TT100K） | 已生成 |
+| `TT100K_speed_det/` | 限速检测子集（单类，仅 pl*+il* 框；images 为真实目录+逐文件软链到 TT100K，**勿改成整目录软链**——会被 ultralytics resolve 到原始标签） | 已生成 |
 | `TT100K_speed_mc/` | 限速多类子集（**pl*+il*，29 类**；pm* 已移出） | 已生成 |
 | `TT100K_weight_pm/` | **限重归档（pm*，非速度）**：hard-negative 备用，勿当正类训练 | 已生成 |
 | `TT100K_speed_meta/` | `class_map.json` / `weight_class_map.json` / `filter_stats.json` / `color_flags.json`（信息性颜色标记，非错误清单） | 已生成 |

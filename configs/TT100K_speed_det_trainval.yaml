@@ -1,0 +1,9 @@
+# TT100K speed-limit detector — training-time config
+# train: official det subset (incl. empty negatives); val: small fast subset
+# (only val images with speed signs, symlinked) to keep per-epoch val fast.
+# Final evaluation uses the official test split via scripts/eval_detector_size.py
+path: /home/sicv/ws/tsr_speedlimit/data/TT100K_val_small
+train: /home/sicv/ws/tsr_speedlimit/data/TT100K_speed_det/images/train
+val: images/val
+names:
+  0: speed_limit_sign
