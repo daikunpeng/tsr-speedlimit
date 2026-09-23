@@ -38,8 +38,20 @@ Traffic Sign Recognition（TSR）：中国场景 **限速标志** 检测与识�
    - tiny classifier 245k 参数 → **test acc 94.9%**，各尺寸桶 ≥88%
      （`reports/classifier_smoke.md`，`runs/classifier/smoke1/`）
    - 主混淆：`il80→il60`（22 次）、相邻限速值互混；增强/难例挖掘待做
-5. 下一步：端到端级联评估（det crop→cls，模拟 640 部署链路）+ 数据增强；X5 导出前先固化评估基线
-6. `data/self/` 预留自采测试集（GS130WI），现为空；就绪前不做依赖自采数据的训练主路径
+5. **E2E 级联评估已完成（2026-09-23）**：`reports/e2e_eval.md`（conf≥0.5，20% pad）
+   - 总体 e2e **82.7%**（det 86.4% × cls **95.6%**）；目标区间 12–28px **91.7%**（det 96.2% × cls 95.3%）
+   - det crop 下 cls acc 95.6% ≈ GT crop 基线 94.9%——det 框质量接近 GT（IoU P50=0.90），
+     **不存在训练/部署框失配**；剩余混淆为相邻限速值互混（il80→il60×16 等）
+   - Det FP 155 个（0.051/img，pm 限重/限高等）被 classifier 强制分到速度类（`pl30/50/40` 居多）
+   - **踩坑记录**：首版 e2e 曾因 cv2.imread(BGR) 直接喂 PIL(RGB) 训练的 classifier，
+     il 蓝底牌 88% 错分为 pl（e2e 假低至 69.9%）；`cvtColor(BGR2RGB)` 修复后 il→pl 跨组错误 265→2。
+     教训：**cv2=BGR、PIL=RGB，跨库混用必须显式转换**
+6. **下一步候选（按优先级，未执行）**：
+   - **C 方案（用户已批准方向，暂不执行）**：classifier 增加 `other` 类（负样本来自
+     det FP crop + pm/pr/ph crop），reject detector FP；保留 detector 高检出能力
+   - 数据增强 / 难例挖掘（il 相邻值互混）
+7. X5 导出前先固化 e2e 基线
+8. `data/self/` 预留自采测试集（GS130WI），现为空；就绪前不做依赖自采数据的训练主路径
 
 ### 限速过滤产物（2026-09-23 语义修正后重建）
 
@@ -108,6 +120,14 @@ runs/ weights/ reports/   # 实验产物、权重、报告
 - torch 2.6.0+cu124 轮子来自阿里云镜像（`.wheels/`，已 gitignore）；不要升级 NVIDIA 驱动（桌面会话依赖）
 - 代理（易踩坑）：国内镜像（阿里云/清华/TT100K）先 `unset` 全部 proxy 直连；仅 GitHub 等海外源用 `http_proxy=http://127.0.0.1:7890`；勿依赖 `ALL_PROXY=socks://`（坑 uv/httpx）
 - 可用显存约 11GB（桌面占用约 0.7GB）；OOM 先降 `batch`
+
+### GPU 任务与 shell 安全（2026-09-23 系统卡死强制重启的教训）
+
+- GPU 任务启动前先 `nvidia-smi` 确认无残留 CUDA 进程；**同一时刻只跑一个 GPU 任务**，勿并行叠加重试
+- 长任务：`nohup .venv/bin/python -u ... > log 2>&1 & echo $! > runs/<task>.pid`，用短 sleep 循环轮询日志，**勿长时间 sleep 挂住工具**
+- **禁止 `pkill -f <脚本名>`**：`bash -c` 命令行里含同样字符串，pkill 会匹配到执行中的 shell 自身（表现为命令挂起直到超时）。终止进程一律 `kill $(cat runs/<task>.pid)`
+- ultralytics `predict` 的 `source` 传**目录字符串**（`stream=True` + wanted-set 过滤），**勿传超大路径 list**（3067 路径曾致进程挂死一小时零进度）
+- 大量小输入的推理必须 **batch 化**（收集后 256/batch forward），勿逐样本调 GPU（上千次小 kernel 会与桌面会话抢卡）
 
 ## 训练与验证原则（摘要）
 
