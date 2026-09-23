@@ -46,11 +46,20 @@ Traffic Sign Recognition（TSR）：中国场景 **限速标志** 检测与识�
    - **踩坑记录**：首版 e2e 曾因 cv2.imread(BGR) 直接喂 PIL(RGB) 训练的 classifier，
      il 蓝底牌 88% 错分为 pl（e2e 假低至 69.9%）；`cvtColor(BGR2RGB)` 修复后 il→pl 跨组错误 265→2。
      教训：**cv2=BGR、PIL=RGB，跨库混用必须显式转换**
-6. **下一步候选（按优先级，未执行）**：
-   - **C 方案（用户已批准方向，暂不执行）**：classifier 增加 `other` 类（负样本来自
-     det FP crop + pm/pr/ph crop），reject detector FP；保留 detector 高检出能力
-   - 数据增强 / 难例挖掘（il 相邻值互混）
-7. X5 导出前先固化 e2e 基线
+6. **A 方案已完成（2026-09-23，C 方案落地）**：classifier v2（28 类含 `other`）
+   - 负样本 `data/cls_neg/`（6672 crop：pm/pr/ph 标签 crop ×4 scale + det FP crop），
+     采集脚本 `scripts/collect_neg_crops.py`；正样本用满 4 scale（30936 crop）
+   - `reports/classifier_v2.md`：speed acc **96.4%**（s1.5 子集 97.0%）、label 负样本拒绝 98.7%
+   - `reports/e2e_v2.md`：e2e **84.2%**、目标区间 **93.7%**；det FP 拒绝名义 61%，
+     经用户目检 155 个"FP"中 **~46 为 TT100K GT 漏标真限速牌** →
+     **真拒绝率 ~86%**、真有效 FP **~0.005/img**，三项验收全部达标
+   - v2b（detfp×8 加权）无增益已弃用；**v2 为当前最优**（`runs/classifier/v2/best.pt`）
+   - 附带发现：train/val detfp 负样本估计 ~30% 为 GT 漏标真牌（污染可控，
+     speed→other 误杀 0.58%）；v3 负样本清洗为候选优化，不阻塞
+7. **下一步：B（X5 导出冒烟）→ C（自采数据）**
+   - B：detector ONNX @640×352 + classifier ONNX @64×64 + parity 校验；板子可用
+   - C：`data/self/`（GS130WI 640×352）部署域真实验证，最终验收关
+   - 候选优化（按需）：v3 负样本清洗、il 相邻值难例挖掘、多帧投票
 8. `data/self/` 预留自采测试集（GS130WI），现为空；就绪前不做依赖自采数据的训练主路径
 
 ### 限速过滤产物（2026-09-23 语义修正后重建）

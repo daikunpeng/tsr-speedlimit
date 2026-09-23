@@ -130,6 +130,7 @@ def main() -> int:
     ap.add_argument("--vis", action="store_true")
     ap.add_argument("--vis-limit", type=int, default=60)
     ap.add_argument("--name", default="e2e_test")
+    ap.add_argument("--report", default="reports/e2e_eval.md")
     args = ap.parse_args()
 
     out_dir = ROOT / "runs" / "eval" / args.name
@@ -309,10 +310,14 @@ def main() -> int:
     t_ca = t_ok / t_cn if t_cn else 0
 
     fp_dist: dict[str, int] = defaultdict(int)
+    fp_rejected = 0
     for r in records:
         for p in r["preds"]:
             if not p["matched"]:
                 fp_dist[p["cls"] or "None"] += 1
+                if p["cls"] == "other":
+                    fp_rejected += 1
+    fp_leak = total_fp - fp_rejected
 
     # ---- report ----
     lines = [
@@ -321,7 +326,8 @@ def main() -> int:
         f"- 生成：{datetime.now(timezone.utc).isoformat()}；split={args.split}；"
         f"det conf≥{args.conf}；crop pad={PAD:.0%}；匹配 IoU≥{IOU}",
         f"- detector：`{args.det_weights}`",
-        f"- classifier：`{args.cls_weights}`（{len(cls_classes)} 类，无 `other`）",
+        f"- classifier：`{args.cls_weights}`（{len(cls_classes)} 类，"
+        f"{'含' if 'other' in cls_classes else '无'} `other`）",
         f"- 图像 {n_img}；GT {total_gt}；检测框 {total_det}",
         "",
         "## 总体",
@@ -357,17 +363,26 @@ def main() -> int:
         f"- cls acc: **{t_ca * 100:.1f}%**（{t_ok}/{t_cn}）",
         f"- **e2e: {t_dr * t_ca * 100:.1f}%**",
         "",
-        "## Detector FP → classifier 输出分布（`other` 类基线）",
+        "## Detector FP → classifier 输出分布（`other` 拒绝情况）",
         "",
-        "（当前 classifier 无 `other` 类，FP 会被强制分到某个速度类）",
+    ]
+    if "other" not in cls_classes:
+        lines.append("（当前 classifier 无 `other` 类，FP 会被强制分到某个速度类）")
+    lines += [
         "",
         "| cls | count |", "|-----|------:|",
     ]
     for cls, cnt in sorted(fp_dist.items(), key=lambda x: -x[1]):
         lines.append(f"| `{cls}` | {cnt} |")
+    if fp_rejected:
+        lines += [
+            "",
+            f"- **FP 被 `other` 拒绝：{fp_rejected}/{total_fp}（{fp_rejected / max(1, total_fp) * 100:.0f}%）**",
+            f"- **有效 FP（漏到速度类）：{fp_leak}（{fp_leak / max(1, n_img):.3f}/img）**",
+        ]
     lines += ["", f"明细：`{out_dir / 'e2e_raw.json'}`", ""]
     REPORTS.mkdir(parents=True, exist_ok=True)
-    (REPORTS / "e2e_eval.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (ROOT / args.report).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     (out_dir / "e2e_raw.json").write_text(json.dumps({
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -484,7 +499,7 @@ def main() -> int:
     print(f"cls acc: {cls_acc * 100:.1f}% ({cls_ok}/{cls_n})")
     print(f"e2e acc: {e2e_acc * 100:.1f}%")
     print(f"target 12-28px: det {t_dr * 100:.1f}% cls {t_ca * 100:.1f}% e2e {t_dr * t_ca * 100:.1f}%")
-    print(f"wrote {REPORTS / 'e2e_eval.md'}", flush=True)
+    print(f"wrote {ROOT / args.report}", flush=True)
     return 0
 
 

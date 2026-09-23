@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
-"""Train the tiny speed-value classifier on GT crops (scale=1.5).
+"""Train the tiny speed-value classifier (v1 / v2 with `other` class).
 
-- Input : data/TT100K_speed_crops/manifest.csv, rows with scale==1.5, resized 64x64
-- Labels: 27 classes with instances (pl*+il*); mapping saved to runs dir
-- Split : train for fitting, test for evaluation (val too small, kept out)
-- Model : tiny CNN (~0.26M params), plain torch
+v1 (backward compatible):
+  .venv/bin/python scripts/train_classifier.py --scale 1.5 --name smoke1
+
+v2 (C plan, 2026-09-23 approved):
+  .venv/bin/python scripts/train_classifier.py --name v2 \
+      --scales 1.0,1.3,1.5,2.0 \
+      --neg-manifest data/cls_neg/manifest.csv --neg-repeat 2 \
+      --report reports/classifier_v2.md
+
+- `other` class: negatives from data/cls_neg/ (pm/pr/ph label crops + det FP crops).
+  train/val rows are TRAINING negatives; test rows are EVAL-ONLY.
 - Coordinate convention: size buckets in @640-equivalent px (px2048*0.3125)
+- cv2=BGR / PIL=RGB lesson: this script feeds the model with PIL(RGB) crops.
+  Any cv2-based crop path must cvtColor before inference.
 
-All intermediate artifacts kept for analysis:
-  runs/classifier/<name>/  ckpt + history.json + class_map.json + test_predictions.json
-  reports/classifier_smoke.md + reports/figures/cls_confusion.png + cls_size_acc.png
+Artifacts (kept for analysis):
+  runs/classifier/<name>/  ckpt + class_map.json + history.json + test_predictions.json
+  reports/<report> + reports/figures/cls_confusion_<name>.png / cls_size_acc_<name>.png
 """
 
 from __future__ import annotations
@@ -17,7 +26,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import sys
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -36,6 +44,7 @@ FIGURES = REPORTS / "figures"
 SCALE_TO_640 = 640.0 / 2048.0
 SIZE_BUCKETS = [(0, 8, "<8"), (8, 12, "8-12"), (12, 16, "12-16"), (16, 24, "16-24"),
                 (24, 32, "24-32"), (32, 48, "32-48"), (48, 1e9, ">=48")]
+IMG_SIZE = 64
 
 
 def bucket_of(size640: float) -> str:
@@ -55,18 +64,12 @@ class CropDS(Dataset):
 
     def __getitem__(self, i):
         r = self.rows[i]
-        with Image.open(CROPS / r["crop_relpath"]) as im:
-            x = im.convert("RGB").resize((64, 64), Image.BILINEAR)
-        # PIL -> HWC uint8 -> CHW float
-        t = torch.from_numpy(_np(x)).permute(2, 0, 1).float() / 255.0
+        with Image.open(Path(r["root"]) / r["crop_relpath"]) as im:
+            x = im.convert("RGB").resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR)
+        import numpy as np
+        t = torch.from_numpy(np.asarray(x).copy()).permute(2, 0, 1).float() / 255.0
         t = (t - 0.5) / 0.5
-        y = self.classes[r["old_name"]]
-        return t, y, i
-
-
-def _np(im):
-    import numpy as np
-    return np.asarray(im).copy()
+        return t, self.classes[r["label"]], i
 
 
 class TinyCNN(nn.Module):
@@ -76,10 +79,10 @@ class TinyCNN(nn.Module):
             return nn.Sequential(nn.Conv2d(ci, co, 3, padding=1, bias=False),
                                  nn.BatchNorm2d(co), nn.ReLU(inplace=True))
         self.f = nn.Sequential(
-            blk(3, 32), nn.MaxPool2d(2),          # 32x32
-            blk(32, 64), nn.MaxPool2d(2),         # 16x16
-            blk(64, 128), nn.MaxPool2d(2),        # 8x8
-            blk(128, 128),                        # 8x8
+            blk(3, 32), nn.MaxPool2d(2),
+            blk(32, 64), nn.MaxPool2d(2),
+            blk(64, 128), nn.MaxPool2d(2),
+            blk(128, 128),
             nn.AdaptiveAvgPool2d(1), nn.Flatten(),
             nn.Dropout(0.2), nn.Linear(128, nc),
         )
@@ -88,47 +91,137 @@ class TinyCNN(nn.Module):
         return self.f(x)
 
 
+def load_speed_rows(scales: set[float]) -> list[dict]:
+    rows = []
+    with MANIFEST.open(encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            if float(r["scale"]) not in scales:
+                continue
+            rows.append({
+                "root": str(CROPS), "crop_relpath": r["crop_relpath"],
+                "label": r["old_name"], "split": r["split"],
+                "scale": float(r["scale"]),
+                "size640": min(float(r["sign_w"]), float(r["sign_h"])) * SCALE_TO_640,
+                "origin": "speed", "src_class": r["old_name"],
+            })
+    return rows
+
+
+def load_neg_rows(path: Path, scales: set[float]) -> list[dict]:
+    rows = []
+    with path.open(encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            sc = float(r["scale"])
+            if sc not in scales and sc != 1.4:  # detfp 恒为 1.4，不受 --scales 过滤
+                continue
+            rows.append({
+                "root": str(path.parent), "crop_relpath": r["crop_relpath"],
+                "label": "other", "split": r["split"], "scale": sc,
+                "size640": min(float(r["sign_w"]), float(r["sign_h"])) * SCALE_TO_640,
+                "origin": r["origin"], "src_class": r["src_class"],
+                "det_conf": float(r["det_conf"]) if r.get("det_conf") else None,
+            })
+    return rows
+
+
+def evaluate(model, rows, classes, dev, names, batch=256):
+    """Return (acc_summary, per-sample dicts)."""
+    from collections import Counter
+    dl = DataLoader(CropDS(rows, classes), batch_size=batch, shuffle=False,
+                    num_workers=8, pin_memory=(dev == "cuda"))
+    model.eval()
+    preds = []
+    with torch.no_grad():
+        for xb, yb, idx in dl:
+            probs = model(xb.to(dev)).softmax(1).cpu()
+            for p, y, i in zip(probs, yb, idx):
+                r = rows[i]
+                pi = int(p.argmax())
+                preds.append({
+                    "crop": r["crop_relpath"], "origin": r["origin"],
+                    "true": names[y], "pred": names[pi],
+                    "conf": round(float(p[pi]), 4),
+                    "scale": r["scale"], "size640": round(r["size640"], 2),
+                    "bucket": bucket_of(r["size640"]),
+                    "src_class": r["src_class"],
+                })
+    acc = sum(p["true"] == p["pred"] for p in preds) / len(preds) if preds else 0.0
+    return acc, preds
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--scale", type=float, default=1.5)
+    ap.add_argument("--scale", type=float, default=None,
+                    help="v1 单 scale 模式（与 --scales 二选一）")
+    ap.add_argument("--scales", default=None, help="逗号分隔，如 1.0,1.3,1.5,2.0")
+    ap.add_argument("--neg-manifest", default=None, help="data/cls_neg/manifest.csv")
+    ap.add_argument("--neg-repeat", type=int, default=1, help="label 负样本过采样倍数")
+    ap.add_argument("--detfp-repeat", type=int, default=None,
+                    help="det FP 负样本过采样倍数（默认同 --neg-repeat）")
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--name", default="smoke1")
+    ap.add_argument("--report", default=None, help="默认 reports/classifier_<name>.md")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
+
+    if args.scale is not None and args.scales is None:
+        scales = {args.scale}
+    elif args.scales is not None:
+        scales = {float(s) for s in args.scales.split(",")}
+    else:
+        scales = {1.5}
     torch.manual_seed(args.seed)
 
-    rows = []
-    with MANIFEST.open(encoding="utf-8") as f:
-        for r in csv.DictReader(f):
-            if float(r["scale"]) == args.scale:
-                r["size640"] = min(float(r["sign_w"]), float(r["sign_h"])) * SCALE_TO_640
-                rows.append(r)
-    train_rows = [r for r in rows if r["split"] == "train"]
-    test_rows = [r for r in rows if r["split"] == "test"]
-    val_rows = [r for r in rows if r["split"] == "val"]
-    train_rows += val_rows  # val (242) folded into training; evaluation on test only
-    names = sorted({r["old_name"] for r in rows})
+    # ---- data ----
+    speed_rows = load_speed_rows(scales)
+    use_neg = args.neg_manifest is not None
+    neg_rows = load_neg_rows(Path(args.neg_manifest), scales) if use_neg else []
+
+    train_rows = [r for r in speed_rows if r["split"] in ("train", "val")]
+    test_speed = [r for r in speed_rows if r["split"] == "test"]
+    if use_neg:
+        neg_train = [r for r in neg_rows if r["split"] in ("train", "val")]
+        neg_test = [r for r in neg_rows if r["split"] == "test"]
+        dr = args.detfp_repeat if args.detfp_repeat is not None else args.neg_repeat
+        train_rows += [r for r in neg_train if r["origin"] == "label"] * args.neg_repeat
+        train_rows += [r for r in neg_train if r["origin"] == "detfp"] * dr
+        n_neg_eff = sum(1 for r in neg_train if r["origin"] == "label") * args.neg_repeat \
+            + sum(1 for r in neg_train if r["origin"] == "detfp") * dr
+        test_rows = test_speed + neg_test
+    else:
+        neg_train, neg_test = [], []
+        n_neg_eff = 0
+        test_rows = test_speed
+
+    names = sorted({r["label"] for r in train_rows} | {r["label"] for r in test_rows})
+    if use_neg:
+        names = [n for n in names if n != "other"] + ["other"]  # other 固定最后
     classes = {n: i for i, n in enumerate(names)}
-    print(f"scale={args.scale}: train={len(train_rows)} test={len(test_rows)} classes={len(names)}")
+    n_pos = len(train_rows)
+    print(f"scales={sorted(scales)} train={n_pos} (pos {n_pos - n_neg_eff} "
+          f"+ neg {n_neg_eff}) test={len(test_rows)} "
+          f"(speed {len(test_speed)} + neg {len(neg_test)}) classes={len(names)}", flush=True)
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     tr_dl = DataLoader(CropDS(train_rows, classes), batch_size=args.batch, shuffle=True,
                        num_workers=8, pin_memory=(dev == "cuda"))
-    te_dl = DataLoader(CropDS(test_rows, classes), batch_size=args.batch, shuffle=False,
-                       num_workers=8, pin_memory=(dev == "cuda"))
-
     model = TinyCNN(len(names)).to(dev)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"TinyCNN params: {n_params / 1e3:.0f}k, device={dev}")
+    print(f"TinyCNN params: {n_params / 1e3:.0f}k, device={dev}", flush=True)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
     crit = nn.CrossEntropyLoss()
 
     out_dir = ROOT / "runs" / "classifier" / args.name
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "class_map.json").write_text(
-        json.dumps({"classes": classes, "folded_val_into_train": True}, indent=1), encoding="utf-8")
+    (out_dir / "class_map.json").write_text(json.dumps({
+        "classes": classes,
+        "scales": sorted(scales),
+        "neg_manifest": args.neg_manifest,
+        "neg_repeat": args.neg_repeat,
+        "folded_val_into_train": True,
+    }, indent=1, ensure_ascii=False), encoding="utf-8")
 
     history = []
     best_acc = 0.0
@@ -148,92 +241,108 @@ def main() -> int:
             correct += (out.argmax(1) == yb).sum().item()
             tot += len(yb)
         tr_loss, tr_acc = loss_sum / tot, correct / tot
-
-        model.eval()
-        tot = correct = 0
-        with torch.no_grad():
-            for xb, yb, _ in te_dl:
-                out = model(xb.to(dev)).cpu()
-                correct += (out.argmax(1) == yb).sum().item()
-                tot += len(yb)
-        te_acc = correct / tot
+        te_acc, _ = evaluate(model, test_rows, classes, dev, names)
         history.append({"epoch": ep, "train_loss": round(tr_loss, 4),
                         "train_acc": round(tr_acc, 4), "test_acc": round(te_acc, 4),
                         "sec": round(time.time() - t0, 1)})
-        print(f"ep{ep:03d} loss={tr_loss:.3f} train={tr_acc * 100:.1f}% test={te_acc * 100:.1f}%")
+        print(f"ep{ep:03d} loss={tr_loss:.3f} train={tr_acc * 100:.1f}% "
+              f"test={te_acc * 100:.1f}%", flush=True)
         if te_acc >= best_acc:
             best_acc = te_acc
             torch.save(model.state_dict(), out_dir / "best.pt")
 
-    # final detailed eval with best weights
+    # ---- final eval with best weights ----
     model.load_state_dict(torch.load(out_dir / "best.pt", map_location=dev, weights_only=True))
     model.eval()
-    preds = []
-    with torch.no_grad():
-        for xb, yb, idx in te_dl:
-            probs = model(xb.to(dev)).softmax(1).cpu()
-            for p_i, y_i, r_i in zip(probs, yb, idx):
-                r = test_rows[r_i]
-                preds.append({
-                    "crop": r["crop_relpath"], "image": r["source_image"],
-                    "true": names[y_i], "pred": names[int(p_i.argmax())],
-                    "conf": round(float(p_i.max()), 4), "size640": round(r["size640"], 2),
-                    "bucket": bucket_of(r["size640"]),
-                })
-    acc = sum(p["true"] == p["pred"] for p in preds) / len(preds)
+    acc, preds = evaluate(model, test_rows, classes, dev, names)
 
-    # confusion pairs
-    conf_pairs = Counter((p["true"], p["pred"]) for p in preds if p["true"] != p["pred"])
-    conf_mat = defaultdict(lambda: defaultdict(int))
-    for p in preds:
-        conf_mat[p["true"]][p["pred"]] += 1
+    # breakdowns
+    sp = [p for p in preds if p["origin"] == "speed"]
+    sp_acc = sum(p["true"] == p["pred"] for p in sp) / len(sp) if sp else 0.0
+    sp15 = [p for p in sp if p["scale"] == 1.5]
+    sp15_acc = sum(p["true"] == p["pred"] for p in sp15) / len(sp15) if sp15 else None
+    ng = [p for p in preds if p["origin"] != "speed"]
+    if ng:
+        rej = sum(p["pred"] == "other" for p in ng) / len(ng)
+        leak = Counter(p["pred"] for p in ng if p["pred"] != "other")
+        # 分来源
+        by_org = defaultdict(lambda: [0, 0])
+        for p in ng:
+            by_org[p["origin"]][0] += 1
+            if p["pred"] == "other":
+                by_org[p["origin"]][1] += 1
+        rej_by_org = {k: round(v[1] / v[0], 4) for k, v in by_org.items()}
+    else:
+        rej, leak, rej_by_org = None, Counter(), {}
+    # speed 被误杀成 other
+    overkill = sum(p["pred"] == "other" for p in sp)
+    conf_pairs = Counter((p["true"], p["pred"]) for p in sp if p["true"] != p["pred"])
 
-    # per-bucket accuracy
     bucket_acc = {}
-    for lo, hi, bname in SIZE_BUCKETS:
-        sel = [p for p in preds if p["bucket"] == bname]
-        bucket_acc[bname] = {
-            "n": len(sel),
-            "acc": round(sum(p["true"] == p["pred"] for p in sel) / len(sel), 4) if sel else None,
-        }
+    for _, _, bname in SIZE_BUCKETS:
+        sel = [p for p in sp if p["bucket"] == bname]
+        bucket_acc[bname] = {"n": len(sel),
+                             "acc": round(sum(p["true"] == p["pred"] for p in sel) / len(sel), 4)
+                             if sel else None}
 
     (out_dir / "history.json").write_text(json.dumps(history, indent=1), encoding="utf-8")
     (out_dir / "test_predictions.json").write_text(
         json.dumps(preds, indent=1, ensure_ascii=False), encoding="utf-8")
-    (out_dir / "summary.json").write_text(
-        json.dumps({"best_test_acc": round(best_acc, 4), "params": n_params,
-                    "final_acc": round(acc, 4), "bucket_acc": bucket_acc,
-                    "top_confusions": [
-                        {"true": t, "pred": p, "n": c}
-                        for (t, p), c in conf_pairs.most_common(20)]},
-                   indent=1, ensure_ascii=False), encoding="utf-8")
+    (out_dir / "summary.json").write_text(json.dumps({
+        "best_test_acc": round(best_acc, 4), "params": n_params,
+        "final_acc": round(acc, 4), "speed_acc": round(sp_acc, 4),
+        "speed_s15_acc": round(sp15_acc, 4) if sp15_acc is not None else None,
+        "neg_reject": rej, "neg_reject_by_origin": rej_by_org,
+        "speed_overkill_as_other": overkill,
+        "bucket_acc": bucket_acc,
+        "top_confusions": [{"true": t, "pred": p, "n": c}
+                           for (t, p), c in conf_pairs.most_common(20)],
+        "neg_leak_top": [{"cls": k, "n": v} for k, v in leak.most_common(10)],
+    }, indent=1, ensure_ascii=False), encoding="utf-8")
 
-    # report + figures
+    # ---- report ----
+    report = args.report or f"reports/classifier_{args.name}.md"
     lines = [
-        "# Tiny classifier smoke 评估",
+        f"# Classifier {args.name} 评估",
         "",
-        f"- 生成：{datetime.now(timezone.utc).isoformat()}；输入 scale={args.scale} crops，64×64；"
-        f"参数 {n_params / 1e3:.0f}k",
-        f"- 训练 {args.epochs} ep（train {len(train_rows)} 含并入的 val；**test {len(test_rows)} 独立评估**）",
-        f"- **test 总准确率：{acc * 100:.2f}%**（best: {best_acc * 100:.2f}%）",
+        f"- 生成：{datetime.now(timezone.utc).isoformat()}；输入 {IMG_SIZE}×{IMG_SIZE}；"
+        f"参数 {n_params / 1e3:.0f}k；scales={sorted(scales)}",
+        f"- 训练 {args.epochs} ep：正样本 {n_pos - len(neg_train) * args.neg_repeat}"
+        + (f" + 负样本 {len(neg_train)}×{args.neg_repeat}" if use_neg else "")
+        + f"；**test {len(test_rows)}**（speed {len(test_speed)}"
+        + (f" + neg {len(neg_test)}" if use_neg else "") + "）独立评估",
         "",
-        "## 尺寸分桶准确率（GT crop，@640 等效 px）",
-        "",
-        "| 桶 | n | acc |", "|----|---|----:|",
+        "| 指标 | 值 |",
+        "|------|----:|",
+        f"| test 总 acc（含 other） | {acc * 100:.2f}% |",
+        f"| **speed 类 acc** | **{sp_acc * 100:.2f}%**",
     ]
-    for lo, hi, bname in SIZE_BUCKETS:
+    if sp15_acc is not None:
+        lines.append(f"| speed s1.5 子集 acc（对比 v1 94.9%） | {sp15_acc * 100:.2f}% |")
+    if use_neg:
+        lines += [
+            f"| **负样本拒绝率（→other）** | **{rej * 100:.1f}%**（{len(ng)} 个） |",
+            f"| 拒绝率 by origin | {rej_by_org} |",
+            f"| speed 误杀为 other | {overkill} |",
+        ]
+    lines += ["",
+              "## 尺寸分桶 speed acc（@640 等效 px）",
+              "", "| 桶 | n | acc |", "|----|---|----:|"]
+    for _, _, bname in SIZE_BUCKETS:
         b = bucket_acc[bname]
-        if b["acc"] is None:
-            lines.append(f"| {bname} | 0 | — |")
-        else:
-            lines.append(f"| {bname} | {b['n']} | {b['acc'] * 100:.1f} |")
-    lines += ["", "## Top-20 混淆对", "", "| true | pred | n |", "|------|------|---:|"]
+        acc_s = f"{b['acc'] * 100:.1f}" if b["acc"] is not None else "—"
+        lines.append(f"| {bname} | {b['n']} | {acc_s} |")
+    lines += ["", "## Top-20 speed 混淆对", "", "| true | pred | n |", "|------|------|---:|"]
     for (t, p), c in conf_pairs.most_common(20):
         lines.append(f"| {t} | {p} | {c} |")
-    lines += ["", f"中间数据：`{out_dir}/`（history / test_predictions / summary）", ""]
-    REPORTS.mkdir(parents=True, exist_ok=True)
-    (REPORTS / "classifier_smoke.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if use_neg and leak:
+        lines += ["", "## 负样本漏检 top（被分成速度类）", "", "| cls | n |", "|-----|---:|"]
+        for k, v in leak.most_common(10):
+            lines.append(f"| `{k}` | {v} |")
+    lines += ["", f"中间数据：`{out_dir}/`", ""]
+    (ROOT / report).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    # ---- figures ----
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -242,51 +351,51 @@ def main() -> int:
         plt.rcParams["font.family"] = ["WenQuanYi Zen Hei", "sans-serif"]
         plt.rcParams["axes.unicode_minus"] = False
         FIGURES.mkdir(parents=True, exist_ok=True)
-        # confusion matrix
-        fig, ax = plt.subplots(figsize=(9, 8), dpi=150)
+        # confusion (speed classes + other)
+        fig, ax = plt.subplots(figsize=(10, 9), dpi=150)
         mat = np.zeros((len(names), len(names)), dtype=int)
-        for t, row in conf_mat.items():
-            for p, v in row.items():
-                mat[classes[t], classes[p]] = v
+        for p in preds:
+            mat[classes[p["true"]], classes[p["pred"]]] += 1
         im = ax.imshow(mat, cmap="Blues")
         thr = mat.max() * 0.5 if mat.max() else 0
         for i in range(len(names)):
             for j in range(len(names)):
                 if mat[i, j]:
-                    ax.text(j, i, mat[i, j], ha="center", va="center", fontsize=6,
+                    ax.text(j, i, mat[i, j], ha="center", va="center", fontsize=5,
                             color="white" if mat[i, j] > thr else "black")
         ax.set_xticks(range(len(names)))
-        ax.set_xticklabels(names, rotation=90, fontsize=7)
+        ax.set_xticklabels(names, rotation=90, fontsize=6)
         ax.set_yticks(range(len(names)))
-        ax.set_yticklabels(names, fontsize=7)
+        ax.set_yticklabels(names, fontsize=6)
         ax.set_xlabel("pred")
         ax.set_ylabel("true")
-        ax.set_title(f"混淆矩阵（test acc {acc * 100:.1f}%）")
+        ax.set_title(f"{args.name} 混淆矩阵（test acc {acc * 100:.1f}%）")
         fig.colorbar(im, fraction=0.046)
         fig.tight_layout()
-        fig.savefig(FIGURES / "cls_confusion.png")
+        fig.savefig(FIGURES / f"cls_confusion_{args.name}.png")
         plt.close(fig)
         # size buckets
         fig, ax = plt.subplots(figsize=(7, 4.5), dpi=150)
         bs = [b[2] for b in SIZE_BUCKETS if bucket_acc[b[2]]["n"]]
-        ns = [bucket_acc[b[2]]["n"] for b in SIZE_BUCKETS if bucket_acc[b[2]]["n"]]
-        ac = [bucket_acc[b[2]]["acc"] * 100 for b in SIZE_BUCKETS if bucket_acc[b[2]]["n"]]
-        ax.bar(bs, ac, color="#2ca02c", width=0.6)
-        for i, (v, n) in enumerate(zip(ac, ns)):
+        ns_ = [bucket_acc[b[2]]["n"] for b in SIZE_BUCKETS if bucket_acc[b[2]]["n"]]
+        acs = [bucket_acc[b[2]]["acc"] * 100 for b in SIZE_BUCKETS if bucket_acc[b[2]]["n"]]
+        ax.bar(bs, acs, color="#2ca02c", width=0.6)
+        for i, (v, n) in enumerate(zip(acs, ns_)):
             ax.text(i, v + 2, f"{v:.0f}%\n(n={n})", ha="center", fontsize=9)
         ax.set_xlabel("GT 短边（@640 等效 px）")
-        ax.set_ylabel("分类准确率 %")
+        ax.set_ylabel("speed 分类准确率 %")
         ax.set_ylim(0, 115)
-        ax.set_title("GT crop 尺寸 → 分类准确率（core KPI 雏形）")
+        ax.set_title(f"{args.name}：GT crop 尺寸 → speed acc")
         ax.spines[["top", "right"]].set_visible(False)
         fig.tight_layout()
-        fig.savefig(FIGURES / "cls_size_acc.png")
+        fig.savefig(FIGURES / f"cls_size_acc_{args.name}.png")
     except Exception as e:  # noqa: BLE001
         print(f"figure skipped: {e}")
 
-    print(f"wrote {REPORTS / 'classifier_smoke.md'}")
+    print(f"wrote {ROOT / report}", flush=True)
     print(f"artifacts -> {out_dir}")
-    print(f"test acc: {acc * 100:.2f}% (best {best_acc * 100:.2f}%)")
+    print(f"test acc {acc * 100:.2f}% | speed acc {sp_acc * 100:.2f}%"
+          + (f" | reject {rej * 100:.1f}% | overkill {overkill}" if use_neg else ""))
     return 0
 
 
