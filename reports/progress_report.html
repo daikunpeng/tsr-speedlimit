@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>限速标志识别项目 · 进展报告</title>
+<style>
+  :root{
+    --bg:#f6f8fb; --card:#ffffff; --ink:#1f2933; --sub:#5b6b7c;
+    --line:#e4e9f0; --accent:#0f6bff; --accent-soft:#e8f0ff;
+    --good:#0a8a4f; --good-soft:#e7f6ef; --bad:#d63c3c; --bad-soft:#fdeeee;
+    --warn:#c07700; --warn-soft:#fdf3e0;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;
+    line-height:1.75;font-size:16px}
+  .wrap{max-width:920px;margin:0 auto;padding:32px 20px 80px}
+  header.hero{background:linear-gradient(135deg,#0f6bff,#5a3bd6);color:#fff;
+    border-radius:16px;padding:40px 36px;margin-bottom:28px}
+  header.hero h1{margin:0 0 8px;font-size:30px;letter-spacing:.5px}
+  header.hero p{margin:4px 0;opacity:.92;font-size:15px}
+  .meta{margin-top:14px;font-size:13px;opacity:.8}
+  section{background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:26px 30px;margin-bottom:22px}
+  h2{font-size:21px;margin:0 0 6px;color:var(--ink)}
+  h2 .n{display:inline-flex;align-items:center;justify-content:center;
+    width:30px;height:30px;border-radius:8px;background:var(--accent);color:#fff;
+    font-size:15px;margin-right:10px;vertical-align:-4px}
+  h3{font-size:17px;margin:22px 0 8px;color:var(--ink)}
+  p{margin:8px 0}
+  .lead{font-size:16px;color:var(--sub)}
+  ul,ol{margin:8px 0;padding-left:22px}
+  li{margin:5px 0}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14.5px}
+  th,td{border:1px solid var(--line);padding:8px 12px;text-align:left}
+  th{background:#f1f5fb;font-weight:600}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  tr.good td{background:var(--good-soft)}
+  .callout{border-radius:10px;padding:14px 16px;margin:14px 0;font-size:15px;
+    border-left:4px solid var(--accent);background:var(--accent-soft)}
+  .callout.good{border-color:var(--good);background:var(--good-soft)}
+  .callout.bad{border-color:var(--bad);background:var(--bad-soft)}
+  .callout.warn{border-color:var(--warn);background:var(--warn-soft)}
+  .callout b{font-weight:600}
+  .tag{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12.5px;
+    font-weight:600;margin-right:6px}
+  .tag.ok{background:var(--good-soft);color:var(--good)}
+  .tag.no{background:var(--bad-soft);color:var(--bad)}
+  .tag.mid{background:var(--warn-soft);color:var(--warn)}
+  .tag.info{background:var(--accent-soft);color:var(--accent)}
+  .timeline{border-left:3px solid var(--line);margin:10px 0 0 8px;padding-left:20px}
+  .tl{position:relative;margin:0 0 18px}
+  .tl::before{content:"";position:absolute;left:-27px;top:6px;width:11px;height:11px;
+    border-radius:50%;background:var(--accent);border:3px solid #fff;box-shadow:0 0 0 2px var(--accent)}
+  .tl .t{font-weight:600;color:var(--accent);font-size:14px}
+  .tl p{margin:2px 0}
+  code{background:#f1f3f6;border-radius:5px;padding:1px 6px;font-size:13.5px;
+    font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .cardbox{border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:#fafbfe}
+  .big{font-size:28px;font-weight:700;color:var(--accent)}
+  .foot{color:var(--sub);font-size:13px;text-align:center;margin-top:28px}
+  @media(max-width:640px){.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>🚦 限速标志识别 · 项目进展报告</h1>
+  <p>用「小检测器 + 小分类器」两步识别道路上的限速牌，最终部署到边缘设备 RDK X5。</p>
+  <p>本报告用尽量通俗的语言，讲清我们从零到现在做了什么、遇到什么问题、怎么一步步排查和解决。</p>
+  <div class="meta">生成时间：2026-09-24 · 面向读者：想快速了解全貌的初学者</div>
+</header>
+
+<!-- ============ 1 ============ -->
+<section>
+  <h2><span class="n">1</span>我们要做什么？</h2>
+  <p class="lead">一句话：<b>让一块小芯片看懂路上的「限速多少」牌子</b>。</p>
+  <p>汽车行驶时，摄像头拍下前方画面，系统要回答两个问题：</p>
+  <ol>
+    <li><b>哪里有限速牌？</b>—— 在画面里把它「框」出来（这叫<code>检测</code>）。</li>
+    <li><b>牌子写着限速多少？</b>—— 是 40、60 还是 80（这叫<code>识别</code>）。</li>
+  </ol>
+  <p>最终要跑在 <b>地瓜派 RDK X5</b> 这种小边缘设备上，输入是 640×352 的车载画面，目标在线至少 10 帧/秒。</p>
+  <div class="callout warn">
+    <b>关键词：边缘设备</b> —— 不是大服务器，算力和内存都有限，所以模型必须<b>小而快</b>，
+    不能盲目追求「更大更新」的模型。
+  </div>
+</section>
+
+<!-- ============ 2 ============ -->
+<section>
+  <h2><span class="n">2</span>核心思路：两级流水线</h2>
+  <p>我们不做一个「一口气认出所有限速值」的大模型，而是拆成<b>两步</b>，各司其职：</p>
+  <table>
+    <tr><th>步骤</th><th>模型</th><th>任务</th><th>特点</th></tr>
+    <tr><td>第一步</td><td><b>检测器 Detector</b>（YOLOv5nu）</td><td>只找「限速牌」，框出来</td><td>只看「是不是限速牌」一种东西</td></tr>
+    <tr><td>第二步</td><td><b>分类器 Classifier</b>（极小模型）</td><td>把框里的牌子裁剪出来，读出「40/60/80…」</td><td>只在裁好的小图里认数字</td></tr>
+  </table>
+  <div class="grid2">
+    <div class="cardbox"><div class="big">2</div>个模型、分工明确<br><span class="lead">谁都不需要十项全能，各自做小任务更稳</span></div>
+    <div class="cardbox"><div class="big">28</div>个分类类别<br><span class="lead">21 种限速值 + 一些「长得像但不是限速」的干扰类</span></div>
+  </div>
+  <p>为什么要拆两步？因为「是不是限速牌」和「具体限速多少」是两件难度不同的事，
+  分开做，每一步都更简单、更容易调优，也更容易在边缘设备上跑快。</p>
+</section>
+
+<!-- ============ 3 ============ -->
+<section>
+  <h2><span class="n">3</span>从零到现在的完整时间线</h2>
+  <div class="timeline">
+
+    <div class="tl">
+      <div class="t">第一步 · 准备数据（TT100K）</div>
+      <p>下载公开的交通标志数据集 <b>TT100K</b>，从中筛出「限速牌」这一小类，
+      清理标签。这里我们发现并修正了一个<b>语义颠倒</b>：<code>pm</code> 其实是「限重（吨）」、
+      <code>il</code> 才是「最低限速（蓝底）」，早期理解反了。</p>
+    </div>
+
+    <div class="tl">
+      <div class="t">第二步 · 冒烟训练（smoke1）</div>
+      <p>先各训一个能跑通的最小模型验证方案可行：</p>
+      <ul>
+        <li>检测器 100 轮 → TT100K 测试集 recall@0.25 = <b>92.4%</b></li>
+        <li>分类器（24.5 万参数）→ 测试准确率 <b>94.9%</b></li>
+        <li>两步串联（E2E）→ <b>82.7%</b></li>
+      </ul>
+      <p>说明「检测 + 分类」两步路线是通的。</p>
+    </div>
+
+    <div class="tl">
+      <div class="t">第三步 · 分类器加「干扰类」other（v2）</div>
+      <p>现实里检测器会误框一些「长得像限速牌」的东西（限重牌、限高牌等）。
+      给分类器加一个 <code>other</code>（其他）类别，专门负责「拒收」这些假货。
+      E2E 提升到 <b>84.2%</b>，目标尺寸区间 <b>93.7%</b>。</p>
+    </div>
+
+    <div class="tl">
+      <div class="t">第四步 · 导出与量化（B0 / B1）</div>
+      <p>为部署做准备：把模型导出成 ONNX 格式（结果与 PyTorch 完全一致），
+      并模拟 INT8 量化（一种给模型「瘦身加速」的手段）。结论：E2E 只掉约 1 个百分点，
+      但发现<b>输出头必须保持高精度</b>，否则分数通道全变 0、召回直接归零。</p>
+    </div>
+
+    <div class="tl">
+      <div class="t">第五步 · 自采数据 + 暴露真问题（C）</div>
+      <p>用<b>真实的 RDK X5 相机</b>（GS130WI）拍了 982 帧自采数据，185 个限速牌。
+      拿冒烟模型一跑，发现<b>成绩暴跌</b>——这就是本项目的核心挑战，见下一节。</p>
+    </div>
+
+    <div class="tl">
+      <div class="t">第六步 · 排查根因 + 一轮轮实验</div>
+      <p>围绕「为什么换到真实相机就失效」做了系列诊断与实验，是本报告的重点。</p>
+    </div>
+
+  </div>
+</section>
+
+<!-- ============ 4 ============ -->
+<section>
+  <h2><span class="n">4</span>遇到的最大问题：换台相机就「水土不服」</h2>
+  <p class="lead">模型在 TT100K（训练用的公开数据）上表现很好，但换到真实相机 GS130WI 后，
+  <b>检测召回率从 92% 掉到 12%</b>，几乎没法用。</p>
+
+  <table>
+    <tr><th>数据来源</th><th>检测召回率@0.5</th><th>E2E（两步全对）</th></tr>
+    <tr><td>TT100K 测试集（训练同源）</td><td class="num">86.4%</td><td class="num">84.2%</td></tr>
+    <tr class="good"><td>GS130WI 真实相机（自采）</td><td class="num">11.9%</td><td class="num">9.7%</td></tr>
+  </table>
+
+  <div class="callout bad">
+    <b>这就是「域适配」问题（domain shift）：</b>训练时看的照片，和实际部署时看到的画面，
+    颜色、明暗、清晰度都不一样。模型没学过新相机这种「长相」，就不认识了。
+  </div>
+  <p>更棘手的是：自采数据<b>量太少、分布不均</b>，不能拿来当训练主数据，
+  只能当「开发测试集」。所以核心矛盾是——<b>怎么让 TT100K 上训练的模型，认出 GS130WI 的牌子</b>。</p>
+</section>
+
+<!-- ============ 5 ============ -->
+<section>
+  <h2><span class="n">5</span>找根因：到底哪里不一样？</h2>
+  <p class="lead">我们没急着瞎试，而是先做「冻结诊断」——把训练好的模型权重冻住不变，
+  只换数据，看它到底在哪些牌子上失败、为什么失败。</p>
+
+  <h3>5.1 三个 trip 的对比，真相浮现</h3>
+  <table>
+    <tr><th>路段</th><th>画面特点</th><th>检测器表现</th><th>结论</th></tr>
+    <tr><td><code>_3</code></td><td>颜色、明暗「标准」</td><td>置信度 0.84–0.92，很好</td><td>模型本身没坏</td></tr>
+    <tr class="good"><td><code>_4</code></td><td><b>过曝</b>，牌子发白</td><td>23/30 张找不到</td><td>太亮 → 失败</td></tr>
+    <tr class="good"><td><code>_9</code></td><td><b>暗红</b>，几乎看不清红色</td><td>34/70 张找不到</td><td>太暗 → 失败</td></tr>
+  </table>
+
+  <div class="callout">
+    <b>根因一：牌面的「颜色/渲染偏移」</b>。检测器主要靠「红圈白底」认限速牌，
+    一旦过曝发白或暗得看不清红，就认不出来了。位置（在画面上方还是中间）影响小得多。
+  </div>
+
+  <h3>5.2 分类器也很脆弱</h3>
+  <p>不仅检测器，分类器对暗红牌子（如 <code>_7</code> 的 pl40）也犹豫：把同一张裁剪图
+  上下平移 1 个像素，结果就在「pl40」和「other」之间翻转——<b>它正卡在决策边界上</b>。</p>
+
+  <h3>5.3 意外发现：尺度混叠</h3>
+  <p>排查中还撞到一个<b>隐藏 bug</b>：某路段 <code>_1</code> 的 pl60 限速牌，
+  <b>每一帧其实都定位到了</b>（框很准），但牌子在 15–20 像素这段小尺寸时，
+  置信度突然「塌陷」到接近 0。我们把同一张图<b>换个尺寸再推理</b>，置信度又回来了。</p>
+  <div class="callout warn">
+    <b>根因二：尺度混叠（scale aliasing）。</b>小牌子被缩小到某个尺寸时，像素会「糊掉/产生锯齿」，
+    模型在这个特定尺寸区间就是不稳定。这是「尺寸敏感性」，不是牌子本身看不清。
+  </div>
+</section>
+
+<!-- ============ 6 ============ -->
+<section>
+  <h2><span class="n">6</span>解决问题的实验路径</h2>
+  <p class="lead">针对上面两个根因（颜色偏移 + 尺度混叠），我们做了一轮轮「单因素对照实验」——
+  每次只改一个变量，好判断到底是谁起了作用。</p>
+
+  <h3>6.1 检测器侧：让模型「见过」各种颜色</h3>
+  <table>
+    <tr><th>实验</th><th>做法</th><th>self 检测@0.5</th><th>TT100K E2E</th><th>判定</th></tr>
+    <tr><td>smoke1（起点）</td><td>原始训练</td><td class="num">11.9%</td><td class="num">84.2%</td><td>—</td></tr>
+    <tr><td>tt_smear1</td><td>模拟「涂抹/压缩」</td><td class="num">10.3%</td><td class="num">81.0%</td><td><span class="tag no">无增益</span></td></tr>
+    <tr><td>预处理锐化/CLAHE</td><td>给输入图做增强</td><td class="num">7.6–8.1%</td><td class="num">—</td><td><span class="tag no">无增益</span></td></tr>
+    <tr><td>tt_crop1</td><td>训练时随机裁切 + 位置</td><td class="num">16.2%</td><td class="num">80.6%</td><td><span class="tag mid">部分有效</span></td></tr>
+    <tr class="good"><td><b>tt_cropcolor1</b></td><td><b>训练时给牌面加颜色/曝光增强</b></td><td class="num"><b>37.3%</b></td><td class="num">75.5%</td><td><span class="tag ok">最大杠杆</span></td></tr>
+  </table>
+  <p>结论：<b>训练时随机模拟「过曝、发暗、偏色」的牌子</b>（tt_cropcolor1）效果最明显，
+  让 self 检测从 11.9% 一路拉到 37.3%（小尺寸 24–32px 更是到了 83.3%）。
+  <b>代价</b>是 TT100K 上干净的牌子有点下降（84.2→75.5%），这是「为新场景买单」。</p>
+
+  <h3>6.2 分类器侧：也给它加颜色增强</h3>
+  <p>分类器 v3 用同样的颜色/曝光增强思路重训：self 的裁剪图分类从 112/185 涨到
+  <b>159/185</b>（暗红牌 <code>_7</code> 从 8/20 涨到 19/20）。</p>
+
+  <h3>6.3 尺度混叠：先用「零训练」的 TTA 验证</h3>
+  <p>针对 <code>_1</code> 的尺度混叠，我们先不训练，而是用 <b>TTA</b>（测试时增强）——
+  推理时把同一张图<b>放缩成多个尺寸 + 左右翻转</b>，把结果合并。零成本、立刻验证思路：</p>
+  <table>
+    <tr><th>指标</th><th>无 TTA</th><th>加 TTA</th></tr>
+    <tr><td>self 检测召回@0.5</td><td class="num">37.3%</td><td class="num">42.2%</td></tr>
+    <tr><td>self E2E</td><td class="num">34.1%</td><td class="num">38.9%</td></tr>
+    <tr><td><code>_1</code> 是否过关</td><td>否（只连续 2 帧对）</td><td class="num"><b>是（连续 3 帧对）</b></td></tr>
+  </table>
+  <div class="callout good">
+    <b>TTA 精准命中！</b> 下采样正好让 <code>_1</code> 那段「塌陷区间」回到高分带，
+    连续 3 帧都读对了。证明「多尺度」确实是解药。代价是推理变慢约 3 倍、误检略增。
+  </div>
+</section>
+
+<!-- ============ 7 ============ -->
+<section>
+  <h2><span class="n">7</span>验收标准为什么改了？</h2>
+  <p>一开始我们用「牌子短边 ≥24 像素、连续 5 帧里 3 帧对」这种<b>只看尺寸</b>的标准。
+  但后来发现：</p>
+  <ul>
+    <li>真实场景里，车接近牌子的过程，尺寸变化很剧烈，硬卡 24px 会漏掉很多。</li>
+    <li>业务上真正关心的是——<b>路牌接近时，能稳定地读对</b>，而不是每一帧都要对。</li>
+  </ul>
+  <p>所以改成更贴近业务的标准：</p>
+  <div class="callout">
+    <b>新标准：</b>在某个牌子的「生命周期」（从出现到离开画面）里，
+    <b>存在连续 3 帧被检出且分类正确</b>，就算过关；如果连续 3 帧<b>读成同一个错误值</b>，
+    则算硬性失败；生命周期太短（&lt;3 帧）的单独标记为「不可验」，不参与通过率计算。
+  </div>
+  <p>这套标准在脚本 <code>eval_self_events.py</code> 里落地，并写进了项目文档。</p>
+</section>
+
+<!-- ============ 8 ============ -->
+<section>
+  <h2><span class="n">8</span>当前进展一览</h2>
+  <p class="lead">在最新的验收标准下，各组合的成绩（自采 10 个实体牌事件，9 个可验）：</p>
+  <table>
+    <tr><th>检测器 + 分类器</th><th>self 事件通过</th><th>self E2E</th><th>TT100K E2E</th></tr>
+    <tr><td>smoke1 + v2（起点）</td><td class="num">3/9</td><td class="num">9.7%</td><td class="num">84.2%</td></tr>
+    <tr><td>smoke1 + v3</td><td class="num">4/9</td><td class="num">10.8%</td><td class="num">84.4%</td></tr>
+    <tr><td>crop1 + v3</td><td class="num">3/9</td><td class="num">15.1%</td><td class="num">80.4%</td></tr>
+    <tr class="good"><td><b>cropcolor1 + v3</b>（当前推荐）</td><td class="num"><b>7/9</b></td><td class="num"><b>34.1%</b></td><td class="num">75.5%</td></tr>
+    <tr class="good"><td><b>cropcolor1 + v3 + TTA</b></td><td class="num"><b>8/9</b></td><td class="num"><b>38.9%</b></td><td class="num">78.2%</td></tr>
+  </table>
+
+  <div class="grid2">
+    <div class="cardbox"><div class="big">8/9</div>事件过关（加 TTA）<br><span class="lead">从最初的 3/9 提升上来的</span></div>
+    <div class="cardbox"><div class="big">+4.9pp</div>颜色增强带来的检测提升<br><span class="lead">self 检测 11.9% → 37.3%</span></div>
+  </div>
+
+  <div class="callout warn">
+    <b>还没结束：</b>剩余失败是 <code>_4</code>（过曝的 pl30）和 <code>_9</code>（生命周期仅 1 帧，不可验）。
+    TT100K 成绩还有约 6 个百分点的「代价」，且当前组合都还<b>没有正式替换默认权重</b>。
+  </div>
+</section>
+
+<!-- ============ 9 ============ -->
+<section>
+  <h2><span class="n">9</span>下一步方向</h2>
+  <p class="lead">我们已经找到两个根因（颜色偏移、尺度混叠），也各自有了「解药」。
+  下一步是决定怎么把解药变成<b>既快又稳</b>的正式方案：</p>
+  <ol>
+    <li>
+      <b>多尺度训练（候选）</b>：把 TTA 的「多尺度」思路<b>在训练阶段就教给模型</b>，
+      这样推理时就不用跑 3 倍，可能拿回同等的尺度鲁棒性。需要一次全量训练，要先征得确认。
+    </li>
+    <li>
+      <b>时序跟踪 + 多帧投票（候选）</b>：<code>_1</code> 其实每帧都被定位到了，
+      只是某些帧分数低。加一个「跟踪」，把前后帧信息串起来，就能跨过低分帧、在高分帧读出结果。
+    </li>
+    <li>
+      <b>恢复实验 A（候选）</b>：把颜色增强的「剂量」调得更精准（比如只在 12–48px 目标尺寸带增广），
+      争取找回 TT100K 上掉的那 6 个百分点。
+    </li>
+  </ol>
+  <div class="callout">
+    <b>共同的原则：</b>每一项涉及「全量训练」或「改默认权重」的动作，都要先和你确认、再执行；
+    我们倾向于先用零成本的小实验验证思路，验证对了再上大动作。
+  </div>
+</section>
+
+<!-- ============ 10 ============ -->
+<section>
+  <h2><span class="n">10</span>给新手的小词典</h2>
+  <table>
+    <tr><th>术语</th><th>通俗解释</th></tr>
+    <tr><td>检测 recall / 召回率</td><td>真实存在的牌子里，模型成功找出了多少（越高越好）</td></tr>
+    <tr><td>置信度 conf</td><td>模型对「这里有个牌子」有多确定，0~1 之间</td></tr>
+    <tr><td>FP（误检）</td><td>模型把不是牌子的东西当成了牌子（越少越好）</td></tr>
+    <tr><td>E2E</td><td>端到端，检测和识别<b>两步都做对</b>才算对</td></tr>
+    <tr><td>域适配 / domain shift</td><td>训练数据与实际部署画面之间的「长相差异」</td></tr>
+    <tr><td>尺度混叠 aliasing</td><td>图片缩放到某些尺寸时像素变糊，模型因此不稳定</td></tr>
+    <tr><td>TTA</td><td>推理时多尺寸 + 翻转再合并，不训练也能提效果</td></tr>
+    <tr><td>增强 augmentation</td><td>训练时随机「变造」图片（调色、翻转、缩放），让模型更皮实</td></tr>
+    <tr><td>INT8 量化</td><td>把模型参数精度降低，让它更小更快（部署常用）</td></tr>
+  </table>
+</section>
+
+<div class="foot">本项目详细记录见 <code>docs/</code>（目标/策略）与 <code>reports/</code>（各实验报告）。</div>
+
+</div>
+</body>
+</html>

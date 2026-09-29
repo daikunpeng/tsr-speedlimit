@@ -1,0 +1,7 @@
+tsr_node:
+  ros__parameters:
+    score_thres: 0.25   # det conf threshold (board quantized: 0.25 == host fp32 0.5)
+    N: 3                # consecutive detections to confirm a track
+    M: 3                # consecutive misses to mark a track lost
+    K: 3                # consecutive same-vote frames to emit a speed value
+    assoc_gate: 2.0     # center-distance association gate (units of object size)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the tiny speed-value classifier (v1 / v2 with `other` class).
+"""Train the tiny speed-value classifier (v1 / v2 with `other` class / v3 color-aug).
 
 v1 (backward compatible):
   .venv/bin/python scripts/train_classifier.py --scale 1.5 --name smoke1
@@ -10,8 +10,21 @@ v2 (C plan, 2026-09-23 approved):
       --neg-manifest data/cls_neg/manifest.csv --neg-repeat 2 \
       --report reports/classifier_v2.md
 
+v3 (2026-09-24 approved, plate-local color/exposure aug):
+  .venv/bin/python scripts/train_classifier.py --name v3 \
+      --scales 1.0,1.3,1.5,2.0 \
+      --neg-manifest data/cls_neg/manifest.csv --neg-repeat 2 \
+      --color-aug 0.5 \
+      --report reports/classifier_v3.md
+
 - `other` class: negatives from data/cls_neg/ (pm/pr/ph label crops + det FP crops).
   train/val rows are TRAINING negatives; test rows are EVAL-ONLY.
+- `--color-aug P`: v3 single factor. With prob P each TRAIN crop gets one of
+  dark-red / washed-out / generic brightness-saturation-gamma jitter
+  (reports/frozen_diag.md: self plates render dark desaturated rings or
+  overexposed centers; v2 saw only clean crops). HUE is never shifted so
+  pl(white/red) vs il(blue) stays learnable. Test rows are never augmented.
+  Default 0 = bit-identical v1/v2 behavior.
 - Coordinate convention: size buckets in @640-equivalent px (px2048*0.3125)
 - cv2=BGR / PIL=RGB lesson: this script feeds the model with PIL(RGB) crops.
   Any cv2-based crop path must cvtColor before inference.
@@ -26,6 +39,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -54,10 +68,56 @@ def bucket_of(size640: float) -> str:
     return SIZE_BUCKETS[-1][2]
 
 
+_worker_rng = None
+
+
+def _aug_rng():
+    """Per-worker RNG seeded from torch's worker seed (differs across workers)."""
+    global _worker_rng
+    if _worker_rng is None:
+        import random as _r
+        _worker_rng = _r.Random(torch.initial_seed() % (2 ** 32))
+    return _worker_rng
+
+
+def color_augment(img: "np.ndarray", rng) -> "np.ndarray":
+    """v3 plate-local color/exposure jitter on a uint8 RGB crop (train only).
+
+    Modes (frozen_diag.md evidence: dark desaturated red rings like trip _7/_9,
+    overexposed washed-out centers like trip _4):
+      dark   (40%): V*0.40-0.75, S*0.35-0.80, extra gamma darkening 1.0-1.6
+      washed (30%): black-level raise x*a+b (a 0.50-0.75, b 70-115), S*0.45-0.85
+      jitter (30%): V*0.70-1.30, S*0.70-1.30, gamma 0.80-1.25
+    Hue untouched -> pl(white/red) vs il(blue) separation stays learnable.
+    """
+    import cv2
+    import numpy as np
+    r = rng.random()
+    hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV).astype(np.float32)
+    if r < 0.4:  # dark red / low light
+        hsv[..., 1] *= rng.uniform(0.35, 0.80)
+        hsv[..., 2] *= rng.uniform(0.40, 0.75)
+        x = np.clip(cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB).astype(np.float32), 0, 255)
+        x = 255.0 * (x / 255.0) ** rng.uniform(1.0, 1.6)
+    elif r < 0.7:  # overexposed / washed-out
+        x = img.astype(np.float32) * rng.uniform(0.50, 0.75) + rng.uniform(70.0, 115.0)
+        hsv2 = cv2.cvtColor(np.clip(x, 0, 255).astype(np.uint8), cv2.COLOR_RGB2HSV).astype(np.float32)
+        hsv2[..., 1] *= rng.uniform(0.45, 0.85)
+        x = np.clip(cv2.cvtColor(hsv2, cv2.COLOR_HSV2RGB).astype(np.float32), 0, 255)
+    else:  # generic brightness / saturation / gamma jitter
+        hsv[..., 1] *= rng.uniform(0.70, 1.30)
+        hsv[..., 2] *= rng.uniform(0.70, 1.30)
+        x = np.clip(cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB).astype(np.float32), 0, 255)
+        x = 255.0 * (x / 255.0) ** rng.uniform(0.80, 1.25)
+    return np.clip(x, 0, 255).astype(np.uint8)
+
+
 class CropDS(Dataset):
-    def __init__(self, rows: list[dict], classes: dict[str, int]):
+    def __init__(self, rows: list[dict], classes: dict[str, int],
+                 color_aug: float = 0.0):
         self.rows = rows
         self.classes = classes
+        self.color_aug = color_aug
 
     def __len__(self):
         return len(self.rows)
@@ -67,7 +127,10 @@ class CropDS(Dataset):
         with Image.open(Path(r["root"]) / r["crop_relpath"]) as im:
             x = im.convert("RGB").resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR)
         import numpy as np
-        t = torch.from_numpy(np.asarray(x).copy()).permute(2, 0, 1).float() / 255.0
+        arr = np.asarray(x).copy()
+        if self.color_aug > 0 and random.random() < self.color_aug:
+            arr = color_augment(arr, _aug_rng())
+        t = torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0
         t = (t - 0.5) / 0.5
         return t, self.classes[r["label"]], i
 
@@ -161,6 +224,8 @@ def main() -> int:
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--color-aug", type=float, default=0.0,
+                    help="v3: train-only plate color/exposure jitter probability (0 = v2 behavior)")
     ap.add_argument("--name", default="smoke1")
     ap.add_argument("--report", default=None, help="默认 reports/classifier_<name>.md")
     ap.add_argument("--seed", type=int, default=0)
@@ -205,7 +270,8 @@ def main() -> int:
           f"(speed {len(test_speed)} + neg {len(neg_test)}) classes={len(names)}", flush=True)
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    tr_dl = DataLoader(CropDS(train_rows, classes), batch_size=args.batch, shuffle=True,
+    tr_dl = DataLoader(CropDS(train_rows, classes, color_aug=args.color_aug),
+                       batch_size=args.batch, shuffle=True,
                        num_workers=8, pin_memory=(dev == "cuda"))
     model = TinyCNN(len(names)).to(dev)
     n_params = sum(p.numel() for p in model.parameters())
@@ -220,6 +286,7 @@ def main() -> int:
         "scales": sorted(scales),
         "neg_manifest": args.neg_manifest,
         "neg_repeat": args.neg_repeat,
+        "color_aug": args.color_aug,
         "folded_val_into_train": True,
     }, indent=1, ensure_ascii=False), encoding="utf-8")
 
@@ -307,6 +374,8 @@ def main() -> int:
         "",
         f"- 生成：{datetime.now(timezone.utc).isoformat()}；输入 {IMG_SIZE}×{IMG_SIZE}；"
         f"参数 {n_params / 1e3:.0f}k；scales={sorted(scales)}",
+        f"- 训练期牌面颜色/曝光增强概率：{args.color_aug:g}"
+        f"（暗红/发白/亮度饱和伽马抖动，仅 train 行；hue 不动）",
         f"- 训练 {args.epochs} ep：正样本 {n_pos - len(neg_train) * args.neg_repeat}"
         + (f" + 负样本 {len(neg_train)}×{args.neg_repeat}" if use_neg else "")
         + f"；**test {len(test_rows)}**（speed {len(test_speed)}"
